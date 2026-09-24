@@ -1,7 +1,7 @@
 /// Pure MoonBit SHA-256 (FIPS 180-4) and HMAC-SHA256 (RFC 2104).
 
 /// First 32 bits of the fractional parts of the cube roots of the first 64 primes.
-let K_TABLE : FixedArray[UInt] = FixedArray::from_array([
+let k_table : FixedArray[UInt] = FixedArray::from_array([
   0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U,
   0x3956c25bU, 0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U,
   0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U,
@@ -54,7 +54,7 @@ pub fn sha256(data : Bytes) -> Bytes {
       let b1 = padded[block + i * 4 + 1].to_int()
       let b2 = padded[block + i * 4 + 2].to_int()
       let b3 = padded[block + i * 4 + 3].to_int()
-      w[i] = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3).to_uint()
+      w[i] = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3).reinterpret_as_uint()
     }
     for i = 16; i < 64; i = i + 1 {
       let s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3)
@@ -72,7 +72,7 @@ pub fn sha256(data : Bytes) -> Bytes {
     for i = 0; i < 64; i = i + 1 {
       let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
       let ch = (e & f) ^ (g & (e ^ 0xFFFFFFFFU))
-      let t1 = hh + s1 + ch + K_TABLE[i] + w[i]
+      let t1 = hh + s1 + ch + k_table[i] + w[i]
       let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
       let maj = (a & b) ^ (a & c) ^ (b & c)
       let t2 = s0 + maj
@@ -97,10 +97,10 @@ pub fn sha256(data : Bytes) -> Bytes {
   let out : Array[Byte] = []
   for i = 0; i < 8; i = i + 1 {
     let v = h[i]
-    out.push(@bx.u8((v >> 24).to_int() & 0xFF))
-    out.push(@bx.u8((v >> 16).to_int() & 0xFF))
-    out.push(@bx.u8((v >> 8).to_int() & 0xFF))
-    out.push(@bx.u8(v.to_int() & 0xFF))
+    out.push(@bx.u8((v >> 24).reinterpret_as_int() & 0xFF))
+    out.push(@bx.u8((v >> 16).reinterpret_as_int() & 0xFF))
+    out.push(@bx.u8((v >> 8).reinterpret_as_int() & 0xFF))
+    out.push(@bx.u8(v.reinterpret_as_int() & 0xFF))
   }
   Bytes::from_array(out)
 }

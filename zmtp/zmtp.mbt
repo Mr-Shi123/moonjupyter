@@ -6,9 +6,9 @@
 /// by the pure encoding functions below.
 
 /// Frame flag bits (ZMTP 3.1 spec, section 3.1).
-let FLAG_MORE : Int = 0x01   /// more frames follow before message boundary
-let FLAG_LONG : Int = 0x02   /// long 64-bit size encoding instead of 8-bit
-let FLAG_COMMAND : Int = 0x04 /// this frame is a COMMAND, not a MESSAGE
+const FLAG_MORE = 0x01    /// more frames follow before message boundary
+const FLAG_LONG = 0x02    /// long 64-bit size encoding instead of 8-bit
+const FLAG_COMMAND = 0x04 /// this frame is a COMMAND, not a MESSAGE
 
 /// Events produced by feeding wire bytes into a session.
 pub(all) enum ZmtpEvent {
@@ -31,6 +31,8 @@ enum ZState {
   Closed
 } derive(Eq)
 
+pub extend ZState with Eq::{not_equal, equal}
+
 /// One connection's parse-side state. Construct with `ZmtpSession::new`.
 pub struct ZmtpSession {
   mut state : ZState
@@ -43,7 +45,7 @@ pub fn ZmtpSession::new() -> ZmtpSession {
   { state: AwGreet, buf: [], pos: 0, pending: [] }
 }
 
-struct ZFrame {
+priv struct ZFrame {
   flags : Int
   body : Array[Byte]
 }
@@ -175,7 +177,7 @@ pub fn ZmtpSession::feed(self : ZmtpSession, data : Bytes) -> Array[ZmtpEvent] {
       match self.try_frame() {
         Some(f) => {
           progressed = true
-          if f.flags & FLAG_COMMAND != 0 {
+          if (f.flags & FLAG_COMMAND) != 0 {
             match command_name(f.body) {
               Some("READY") => {
                 self.state = Est
@@ -201,14 +203,14 @@ pub fn ZmtpSession::feed(self : ZmtpSession, data : Bytes) -> Array[ZmtpEvent] {
       match self.try_frame() {
         Some(f) => {
           progressed = true
-          if f.flags & FLAG_COMMAND != 0 {
+          if (f.flags & FLAG_COMMAND) != 0 {
             match command_name(f.body) {
-              Some("PING") => events.push(PingReceived(ping_context(f.body))),
+              Some("PING") => events.push(PingReceived(ping_context(f.body)))
               _ => () // PONG/HICCUP/ERROR etc: ignore
             }
           } else {
             self.pending.push(Bytes::from_array(f.body))
-            if f.flags & FLAG_MORE == 0 {
+            if (f.flags & FLAG_MORE) == 0 {
               events.push(Message(self.pending))
               self.pending = []
             }
@@ -266,7 +268,7 @@ fn ZmtpSession::try_frame(self : ZmtpSession) -> ZFrame? {
   let flags = self.buf[base].to_int()
   let mut hdr = 2
   let mut size = 0
-  if flags & FLAG_LONG != 0 {
+  if (flags & FLAG_LONG) != 0 {
     if avail < 10 {
       return None
     }

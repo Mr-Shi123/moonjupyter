@@ -7,10 +7,10 @@
 /// function so this package stays transport/backend independent.
 
 /// The envelope delimiter shared by every Jupyter message.
-pub let DELIMITER : Bytes = b"<IDS|MSG>"
+pub let delimiter : Bytes = b"<IDS|MSG>"
 
 /// Jupyter wire protocol version (currently v5.4).
-let PROTOCOL_VERSION : String = "5.4"
+const PROTOCOL_VERSION = "5.4"
 
 /// A parsed Jupyter message. `header`/`parent`/`metadata`/`content` are kept
 /// as raw JSON so replies can echo the parent header verbatim.
@@ -120,7 +120,7 @@ pub fn new_header(session_id : String, username : String, date : String, msg_typ
 }
 
 /// Serialize header/parent/metadata/content into the 6 wire frames that
-/// follow the identity frames: [DELIMITER, sig, header, parent, meta, content].
+/// follow the identity frames: [delimiter, sig, header, parent, meta, content].
 /// Outgoing parts are sent uncompressed; the signature is over the exact
 /// uncompressed bytes, matching jupyter_client's verification.
 pub fn build_frames(
@@ -136,7 +136,7 @@ pub fn build_frames(
   let content_b = @bx.utf8_encode(@json.stringify(content))
   let sig = sign(key, header_b, parent_b, meta_b, content_b)
   [
-    DELIMITER,
+    delimiter,
     @bx.utf8_encode(sig),
     header_b,
     parent_b,
@@ -155,12 +155,12 @@ fn maybe_inflate(b : Bytes, inflate : (Bytes) -> Bytes) -> Bytes {
   }
 }
 
-/// Parse a full ROUTER-side message: [identities..., DELIMITER, sig,
+/// Parse a full ROUTER-side message: [identities..., delimiter, sig,
 /// header, parent, metadata, content]. `inflate` decompresses zlib parts.
 pub fn parse_message(frames : Array[Bytes], key : String, inflate : (Bytes) -> Bytes) -> Result[JMsg, String] {
   let mut di = -1
   for i = 0; i < frames.length(); i = i + 1 {
-    if @bx.bytes_equal(frames[i], DELIMITER) {
+    if @bx.bytes_equal(frames[i], delimiter) {
       di = i
       break
     }
