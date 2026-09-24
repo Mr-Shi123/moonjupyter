@@ -140,18 +140,18 @@ pub fn hex_encode(b : Bytes) -> String {
 
 test "utf8 roundtrip" {
   let s = "héllo wörld 你好 🥮"
-  assert_eq!(utf8_decode(utf8_encode(s)), s)
+  assert_eq(utf8_decode(utf8_encode(s)), s)
 }
 
 test "hex" {
-  assert_eq!(hex_encode(utf8_encode("ABC")), "414243")
+  assert_eq(hex_encode(utf8_encode("ABC")), "414243")
 }
 
 test "concat and slice" {
   let a = utf8_encode("hello ")
   let b = utf8_encode("world")
   let joined = concat([a, b])
-  assert_eq!(utf8_decode(joined), "hello world")
-  assert_eq!(utf8_decode(slice(joined, 6, 11)), "world")
-  assert_true!(bytes_equal(a, slice(joined, 0, 6)))
+  assert_eq(utf8_decode(joined), "hello world")
+  assert_eq(utf8_decode(slice(joined, 6, 11)), "world")
+  assert_true(bytes_equal(a, slice(joined, 0, 6)))
 }

@@ -146,11 +146,11 @@ pub fn hmac_sha256(key : Bytes, msg : Bytes) -> Bytes {
 }
 
 test "sha256 vectors" {
-  assert_eq!(
+  assert_eq(
     @bx.hex_encode(sha256(b"")),
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   )
-  assert_eq!(
+  assert_eq(
     @bx.hex_encode(sha256(b"abc")),
     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
   )
@@ -158,7 +158,7 @@ test "sha256 vectors" {
 
 test "hmac rfc4231 case 2" {
   let sig = hmac_sha256(@bx.utf8_encode("Jefe"), @bx.utf8_encode("what do ya want for nothing?"))
-  assert_eq!(
+  assert_eq(
     @bx.hex_encode(sig),
     "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
   )

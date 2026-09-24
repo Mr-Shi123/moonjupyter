@@ -357,15 +357,15 @@ fn ping_context(body : Array[Byte]) -> Bytes {
 test "handshake" {
   let s = ZmtpSession::new()
   let events = s.feed(greeting_bytes(true))
-  assert_eq!(events.length(), 1)
+  assert_eq(events.length(), 1)
   match events[0] {
     PeerGreeting => ()
-    _ => assert_true!(false)
+    _ => assert_true(false)
   }
   let events2 = s.feed(ready_command("REQ"))
   match events2[0] {
-    PeerReady(t) => assert_eq!(t, "REQ")
-    _ => assert_true!(false)
+    PeerReady(t) => assert_eq(t, "REQ")
+    _ => assert_true(false)
   }
 }
 
@@ -377,10 +377,10 @@ test "message roundtrip" {
   let events = s.feed(wire)
   match events[0] {
     Message(frames) => {
-      assert_eq!(frames.length(), 3)
-      assert_true!(@bx.bytes_equal(frames[1], b"two"))
+      assert_eq(frames.length(), 3)
+      assert_true(@bx.bytes_equal(frames[1], b"two"))
     }
-    _ => assert_true!(false)
+    _ => assert_true(false)
   }
 }
 
@@ -393,7 +393,7 @@ test "byte-by-byte feed and long frames" {
   }
   match last[0] {
     PeerGreeting => ()
-    _ => assert_true!(false)
+    _ => assert_true(false)
   }
   let r = ready_command("PUB")
   let mut last2 : Array[ZmtpEvent] = []
@@ -401,8 +401,8 @@ test "byte-by-byte feed and long frames" {
     last2 = s.feed(@bx.slice(r, i, i + 1))
   }
   match last2[0] {
-    PeerReady(t) => assert_eq!(t, "PUB")
-    _ => assert_true!(false)
+    PeerReady(t) => assert_eq(t, "PUB")
+    _ => assert_true(false)
   }
   // long frame (>255 bytes)
   let big : Array[Byte] = []
@@ -412,9 +412,9 @@ test "byte-by-byte feed and long frames" {
   let events = s.feed(encode_message([Bytes::from_array(big)]))
   match events[0] {
     Message(frames) => {
-      assert_eq!(frames.length(), 1)
-      assert_eq!(frames[0].length(), 300)
+      assert_eq(frames.length(), 1)
+      assert_eq(frames[0].length(), 300)
     }
-    _ => assert_true!(false)
+    _ => assert_true(false)
   }
 }

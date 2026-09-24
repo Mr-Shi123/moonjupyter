@@ -251,12 +251,12 @@ test "uuid format" {
   }
   let u = uuid_v4_from(Bytes::from_array(b))
   // 00000000-0004-0..-8...-............
-  assert_eq!(u.length(), 36)
-  assert_eq!(@bx.slice(u, 8, 9), "-")
-  assert_eq!(@bx.slice(u, 13, 14), "-")
-  assert_eq!(@bx.slice(u, 18, 19), "-")
-  assert_eq!(@bx.slice(u, 23, 24), "-")
-  assert_eq!(@bx.slice(u, 14, 15), "4")
+  assert_eq(u.length(), 36)
+  assert_eq(@bx.slice(u, 8, 9), "-")
+  assert_eq(@bx.slice(u, 13, 14), "-")
+  assert_eq(@bx.slice(u, 18, 19), "-")
+  assert_eq(@bx.slice(u, 23, 24), "-")
+  assert_eq(@bx.slice(u, 14, 15), "4")
 }
 
 test "build and parse roundtrip" {
@@ -274,11 +274,11 @@ test "build and parse roundtrip" {
   }
   match parse_message(full, "secret", noop) {
     Ok(msg) => {
-      assert_eq!(msg.msg_type, "kernel_info_request")
-      assert_eq!(msg.identities.length(), 2)
-      assert_eq!(jstr_field(msg.header, "session"), "sess")
+      assert_eq(msg.msg_type, "kernel_info_request")
+      assert_eq(msg.identities.length(), 2)
+      assert_eq(jstr_field(msg.header, "session"), "sess")
     }
-    Err(e) => assert_true!(false)
+    Err(e) => assert_true(false)
   }
 }
 
@@ -293,7 +293,7 @@ test "bad signature rejected" {
     b
   }
   match parse_message(full, "other-key", noop) {
-    Ok(_) => assert_true!(false)
+    Ok(_) => assert_true(false)
     Err(_) => ()
   }
 }
@@ -302,10 +302,10 @@ test "parse connection file" {
   let raw = "{\"shell_port\": 1, \"iopub_port\": 2, \"stdin_port\": 3, \"control_port\": 4, \"hb_port\": 5, \"ip\": \"127.0.0.1\", \"transport\": \"tcp\", \"signature_scheme\": \"hmac-sha256\", \"key\": \"a-key\"}"
   match parse_connection(raw) {
     Ok(c) => {
-      assert_eq!(c.shell_port, 1)
-      assert_eq!(c.hb_port, 5)
-      assert_eq!(c.key, "a-key")
+      assert_eq(c.shell_port, 1)
+      assert_eq(c.hb_port, 5)
+      assert_eq(c.key, "a-key")
     }
-    Err(_) => assert_true!(false)
+    Err(_) => assert_true(false)
   }
 }

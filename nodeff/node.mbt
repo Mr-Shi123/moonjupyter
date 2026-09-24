@@ -6,7 +6,7 @@
 
 // External JS values (opaque to MoonBit).
 #external
-type JsSocket
+priv type JsSocket
 
 // ---- raw FFI ----
 
