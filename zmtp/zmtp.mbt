@@ -5,9 +5,10 @@
 /// `ZmtpSession::feed` and receives events; outgoing wire bytes are produced
 /// by the pure encoding functions below.
 
-let FLAG_MORE : Int = 0x01
-let FLAG_LONG : Int = 0x02
-let FLAG_COMMAND : Int = 0x04
+/// Frame flag bits (ZMTP 3.1 spec, section 3.1).
+let FLAG_MORE : Int = 0x01   /// more frames follow before message boundary
+let FLAG_LONG : Int = 0x02   /// long 64-bit size encoding instead of 8-bit
+let FLAG_COMMAND : Int = 0x04 /// this frame is a COMMAND, not a MESSAGE
 
 /// Events produced by feeding wire bytes into a session.
 pub(all) enum ZmtpEvent {

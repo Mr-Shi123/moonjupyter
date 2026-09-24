@@ -8,6 +8,7 @@
 ///   iopub   PUB                            - output broadcast
 ///   hb      REP     (client: REQ)          - heartbeat echo
 
+/// A connected peer on a single ZMTP socket (keyed by TCP connection id).
 struct Peer {
   id : Int
   session : @zmtp.ZmtpSession

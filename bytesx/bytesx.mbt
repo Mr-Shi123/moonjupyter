@@ -17,6 +17,7 @@ pub fn concat(parts : Array[Bytes]) -> Bytes {
 }
 
 /// Copy a byte range [start, end) into a new Bytes.
+/// If `end` exceeds the byte length the slice is truncated to EOF.
 pub fn slice(b : Bytes, start : Int, end : Int) -> Bytes {
   let out : Array[Byte] = []
   let hi = if end < b.length() {

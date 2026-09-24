@@ -1,5 +1,8 @@
 # moonjupyter 🥮
 
+[![GitHub stars](https://img.shields.io/github/stars/Mr-Shi123/moonjupyter?style=social)](https://github.com/Mr-Shi123/moonjupyter)
+[![CI](https://github.com/Mr-Shi123/moonjupyter/actions/workflows/ci.yml/badge.svg)](https://github.com/Mr-Shi123/moonjupyter/actions)
+
 **A Jupyter kernel for MoonBit, with a pure-MoonBit ZeroMQ (ZMTP 3.1) protocol implementation.**
 
 一个纯 MoonBit 实现的 Jupyter Kernel：在 JupyterLab / Jupyter Notebook / VS Code

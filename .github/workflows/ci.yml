@@ -25,4 +25,4 @@ jobs:
         run: moon check --target js
 
       - name: moon test (js target)
-        run: moon test --target js
+        run: moon test --target js --reporter spec

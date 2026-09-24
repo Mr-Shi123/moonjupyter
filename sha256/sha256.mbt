@@ -1,5 +1,6 @@
 /// Pure MoonBit SHA-256 (FIPS 180-4) and HMAC-SHA256 (RFC 2104).
 
+/// First 32 bits of the fractional parts of the cube roots of the first 64 primes.
 let K_TABLE : FixedArray[UInt] = FixedArray::from_array([
   0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U,
   0x3956c25bU, 0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U,

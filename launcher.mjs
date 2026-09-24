@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // moonjupyter launcher: starts the MoonBit kernel for a Jupyter connection file.
+// Invoked by kernelspec via `node launcher.mjs <connection-file>`.
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

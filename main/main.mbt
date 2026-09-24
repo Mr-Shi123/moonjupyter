@@ -9,6 +9,7 @@ fn main {
     @nodeff.eprint("usage: moonjupyter -f <connection-file>")
     @nodeff.exit(1)
   }
+  // Parse the Jupyter connection file (JSON: ports, transport, signature key, ...)
   match @jupyter.parse_connection(@nodeff.read_text(path)) {
     Err(e) => {
       @nodeff.eprint("[moonjupyter] invalid connection file \{path}: \{e}")
