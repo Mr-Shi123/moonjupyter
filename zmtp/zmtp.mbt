@@ -49,15 +49,16 @@ struct ZFrame {
 }
 
 /// Build the 64-byte ZMTP greeting.
+/// Magic `0xFF` + 8 zero bytes + `0x7F` + version + mechanism + as-server flag.
 pub fn greeting_bytes(as_server : Bool) -> Bytes {
   let out : Array[Byte] = []
-  out.push(@bx.u8(0xFF))
+  out.push(@bx.u8(0xFF))       /// 0xFF magic byte
   for _i = 0; _i < 8; _i = _i + 1 {
-    out.push(@bx.u8(0))
+    out.push(@bx.u8(0))       /// 8-byte long size placeholder
   }
-  out.push(@bx.u8(0x7F))
-  out.push(@bx.u8(3)) // version major
-  out.push(@bx.u8(1)) // version minor
+  out.push(@bx.u8(0x7F))       /// version-present flag
+  out.push(@bx.u8(3))         /// version major
+  out.push(@bx.u8(1))         /// version minor
   // mechanism "NULL" padded to 20 bytes
   push_str(out, "NULL")
   for _i = 0; _i < 16; _i = _i + 1 {

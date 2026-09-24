@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Registers the MoonBit kernel with Jupyter (kernelspec installation).
+// Writes kernel.json + launcher.mjs copy into the user's kernels directory.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";

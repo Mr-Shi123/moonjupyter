@@ -25,12 +25,13 @@ struct Kernel {
   key : String
   session_id : String
   username : String
-  mut exec_count : Int
+  mut exec_count : Int  /// incremented on each execute_reply (Jupyter spec §4.3)
   mut iopub : Peer?
   mut parent : Json?
 }
 
 pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
+  // Per-kernel session: one shell ROUTER, one iopub PUB, one REP hb, ...
   let kernel : Kernel = {
     key: conn.key,
     session_id: @jupyter.uuid_v4_from(@nodeff.random_bytes(16)),

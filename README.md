@@ -28,6 +28,7 @@ Notebook 中交互式运行 MoonBit 代码。项目同时包含一个可独立�
 ## Quick Start
 
 前置要求：`moon` CLI、Node.js >= 18、Jupyter（Lab/Notebook 均可）。
+> Tip: 在 `moonup` 或 `moon` 官网装好 CLI 后，用 `moon --version` 验证。
 
 ```bash
 git clone https://github.com/Mr-Shi123/moonjupyter
@@ -42,6 +43,8 @@ node install.mjs
 ```
 
 重启 JupyterLab，新建 Notebook 选择 **MoonBit** kernel，然后：
+
+> 💡 在 JupyterLab 里可以直接 `Shift+Enter` 执行 cell，和 Python kernel 完全一致。
 
 ```moonbit
 println("hello from MoonBit 🥮")

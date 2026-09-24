@@ -60,4 +60,4 @@
 每个 cell 写入临时 MoonBit 项目（`moon.mod.json` + `src/main`），若 cell
 代码不含 `fn main` 则自动包裹生成入口，然后 `moon run src/main` 执行，
 stdout/stderr 按行以 `stream` 消息推送到 iopub，退出码决定 execute_reply
-的 ok/error。这是无状态执行（跨 cell 不共享定义）——见 README 路线图。
+的 `status`（ok/error）。这是无状态执行（跨 cell 不共享定义）——见 README 路线图。

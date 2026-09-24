@@ -15,6 +15,6 @@ fn main {
       @nodeff.eprint("[moonjupyter] invalid connection file \{path}: \{e}")
       @nodeff.exit(1)
     }
-    Ok(conn) => @kernel.run_kernel(conn)
+    Ok(conn) => @kernel.run_kernel(conn)  // never returns (kernel owns the event loop)
   }
 }

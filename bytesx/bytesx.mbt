@@ -31,7 +31,7 @@ pub fn slice(b : Bytes, start : Int, end : Int) -> Bytes {
   Bytes::from_array(out)
 }
 
-/// Equality of two byte strings.
+/// Equality of two byte strings (length then element-wise short-circuit).
 pub fn bytes_equal(a : Bytes, b : Bytes) -> Bool {
   if a.length() != b.length() {
     return false
@@ -44,7 +44,7 @@ pub fn bytes_equal(a : Bytes, b : Bytes) -> Bool {
   true
 }
 
-/// Build a single-character string from a Unicode code point.
+/// Build a single-character string from a Unicode code point (BMP, no surrogate handling).
 pub fn char_str(cp : Int) -> String {
   let c = Int::unsafe_to_char(cp)
   "\{c}"

@@ -15,7 +15,7 @@ if (!connectionFile) {
 const command = `moon run main --target js -- -f "${connectionFile}"`;
 const child = spawn(command, {
   cwd: root,
-  shell: true,
+  shell: true,          // shell:true for Windows PATH resolution of `moon`
   stdio: ["ignore", "inherit", "inherit"],
 });
 

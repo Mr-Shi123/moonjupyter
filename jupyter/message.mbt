@@ -24,6 +24,7 @@ pub(all) struct JMsg {
 }
 
 /// A parsed kernel connection file (kernel-<id>.json).
+/// Matches Jupyter Client's `connection_info` dict exactly.
 pub(all) struct ConnectionInfo {
   ip : String
   shell_port : Int

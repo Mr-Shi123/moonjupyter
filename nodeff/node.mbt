@@ -40,6 +40,7 @@ extern "js" fn js_sock_close(sock : JsSocket) -> Unit =
 
 extern "js" fn js_inflate(data : Bytes) -> Bytes =
   #|(data) => {
+  #|  // Incoming may be plain JSON or zlib-compressed; fall back to empty on failure.
   #|  try { return require("zlib").inflateSync(data); }
   #|  catch (e) { return new Uint8Array(0); }
   #|}
