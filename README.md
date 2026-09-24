@@ -115,6 +115,7 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 ## Changelog
 
+- **v0.1.3** — bind_channel doc, UTF-8 surrogate comment, bump version
 - **v0.1.2** — CI tweaks, kernel pkg import sort, security doc section
 - **v0.1.1** — bump version, README badges, ZMTP flag annotations
 

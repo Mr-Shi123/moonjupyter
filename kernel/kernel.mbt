@@ -63,6 +63,7 @@ fn Channel::new(name : String, socket_type : String) -> Channel {
 }
 
 fn bind_channel(k : Kernel, ch : Channel, ip : String, port : Int) -> Unit {
+  // Every incoming TCP connection becomes a Peer on this channel.
   @nodeff.tcp_server(
     ip,
     port,

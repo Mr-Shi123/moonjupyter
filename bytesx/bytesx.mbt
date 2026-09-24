@@ -74,7 +74,7 @@ pub fn utf8_encode(s : String) -> Bytes {
         out.push(u8(0x80 | (cp & 0x3F)))
         i = i + 2
       } else {
-        // stray high surrogate -> replacement char
+        // stray high surrogate without a trailing low surrogate -> U+FFFD
         out.push(u8(0xEF))
         out.push(u8(0xBF))
         out.push(u8(0xBD))
