@@ -1,0 +1,10 @@
+{
+  "import": [
+    {
+      "path": "moonjupyter/moonjupyter/bytesx",
+      "alias": "bx"
+    },
+    "moonjupyter/moonjupyter/sha256",
+    "moonbitlang/core/json"
+  ]
+}

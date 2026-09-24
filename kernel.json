@@ -1,0 +1,6 @@
+{
+  "argv": ["node", "/absolute/path/to/moonjupyter/launcher.mjs", "{connection_file}"],
+  "display_name": "MoonBit",
+  "language": "moonbit",
+  "interrupt_mode": "message"
+}

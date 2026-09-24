@@ -1,0 +1,10 @@
+{
+  "name": "moonjupyter/moonjupyter",
+  "version": "0.1.0",
+  "description": "A Jupyter kernel for MoonBit, with a pure-MoonBit ZeroMQ (ZMTP 3.1) protocol implementation",
+  "keywords": ["jupyter", "kernel", "zeromq", "zmtp", "repl", "moonbit"],
+  "license": "MIT",
+  "readme": "README.md",
+  "repository": "https://github.com/Mr-Shi123/moonjupyter",
+  "deps": {}
+}
