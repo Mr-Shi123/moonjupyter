@@ -76,6 +76,7 @@ pub fn greeting_bytes(as_server : Bool) -> Bytes {
 }
 
 /// Build the READY handshake command announcing our socket type.
+/// READY command: FRAME(flags=COMMAND, body="READY\x00\x00\x00\x05Socket-Type<4-byte-len><type>")
 pub fn ready_command(socket_type : String) -> Bytes {
   let body : Array[Byte] = []
   body.push(@bx.u8(5))
