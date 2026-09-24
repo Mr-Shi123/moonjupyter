@@ -1,8 +1,8 @@
 {
   "import": [
     "moonjupyter/moonjupyter/bytesx",
-    "moonjupyter/moonjupyter/zmtp",
     "moonjupyter/moonjupyter/jupyter",
-    "moonjupyter/moonjupyter/nodeff"
+    "moonjupyter/moonjupyter/nodeff",
+    "moonjupyter/moonjupyter/zmtp"
   ]
 }

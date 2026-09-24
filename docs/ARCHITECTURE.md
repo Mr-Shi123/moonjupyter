@@ -61,3 +61,7 @@
 代码不含 `fn main` 则自动包裹生成入口，然后 `moon run src/main` 执行，
 stdout/stderr 按行以 `stream` 消息推送到 iopub，退出码决定 execute_reply
 的 `status`（ok/error）。这是无状态执行（跨 cell 不共享定义）——见 README 路线图。
+
+## 安全机制
+
+本项目暂只实现 NULL 安全机制（ZMTP 3.1 §4.1）。CURVE 路线依赖 `mooncrypt` 等原生加密库。
