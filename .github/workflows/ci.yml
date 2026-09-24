@@ -15,8 +15,11 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install MoonBit toolchain (latest)
-        run: curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+      - name: Install MoonBit toolchain (v0.10.4)
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          moonup install v0.10.4 || true
+          moonup use v0.10.4 || true
 
       - name: Add moon to PATH
         run: echo "$HOME/.moon/bin" >> $GITHUB_PATH

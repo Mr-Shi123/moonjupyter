@@ -186,24 +186,30 @@ pub fn parse_message(frames : Array[Bytes], key : String, inflate : (Bytes) -> B
       return Err("bad message signature")
     }
   }
-  let header = @json.parse(@bx.utf8_decode(header_b))
-  let parent = @json.parse(@bx.utf8_decode(parent_b))
-  let metadata = @json.parse(@bx.utf8_decode(meta_b))
-  let content = @json.parse(@bx.utf8_decode(content_b))
-  Ok({
-    identities,
-    header,
-    parent,
-    metadata,
-    content,
-    msg_type: jstr_field(header, "msg_type"),
-  })
+  try {
+    let header = @json.parse(@bx.utf8_decode(header_b))
+    let parent = @json.parse(@bx.utf8_decode(parent_b))
+    let metadata = @json.parse(@bx.utf8_decode(meta_b))
+    let content = @json.parse(@bx.utf8_decode(content_b))
+    Ok({
+      identities,
+      header,
+      parent,
+      metadata,
+      content,
+      msg_type: jstr_field(header, "msg_type"),
+    })
+  } catch {
+    e => Err("invalid JSON part: \{e.to_string()}")
+  }
 }
 
 /// ---- connection file ----
 
 pub fn parse_connection(s : String) -> Result[ConnectionInfo, String] {
-  let j = @json.parse(s)
+  let j = try @json.parse(s) catch {
+    e => return Err("invalid connection JSON: \{e.to_string()}")
+  } noraise { j => j }
   let ip = match jget(j, "ip") {
     Some(v) => jstr(v)
     None => "127.0.0.1"
