@@ -71,7 +71,7 @@ pub fn obj(pairs : Array[(String, Json)]) -> Json {
   for p in pairs {
     m[p.0] = p.1
   }
-  Json::Object(m)
+  Json::object(m)
 }
 
 /// ---- identity / time ----
@@ -186,18 +186,10 @@ pub fn parse_message(frames : Array[Bytes], key : String, inflate : (Bytes) -> B
       return Err("bad message signature")
     }
   }
-  let header = match @json.parse(@bx.utf8_decode(header_b)) {
-    h => h
-  }
-  let parent = match @json.parse(@bx.utf8_decode(parent_b)) {
-    p => p
-  }
-  let metadata = match @json.parse(@bx.utf8_decode(meta_b)) {
-    m => m
-  }
-  let content = match @json.parse(@bx.utf8_decode(content_b)) {
-    c => c
-  }
+  let header = @json.parse(@bx.utf8_decode(header_b))
+  let parent = @json.parse(@bx.utf8_decode(parent_b))
+  let metadata = @json.parse(@bx.utf8_decode(meta_b))
+  let content = @json.parse(@bx.utf8_decode(content_b))
   Ok({
     identities,
     header,
@@ -211,9 +203,7 @@ pub fn parse_message(frames : Array[Bytes], key : String, inflate : (Bytes) -> B
 /// ---- connection file ----
 
 pub fn parse_connection(s : String) -> Result[ConnectionInfo, String] {
-  let j = match @json.parse(s) {
-    j => j
-  }
+  let j = @json.parse(s)
   let ip = match jget(j, "ip") {
     Some(v) => jstr(v)
     None => "127.0.0.1"
