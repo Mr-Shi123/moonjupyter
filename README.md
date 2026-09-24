@@ -23,7 +23,7 @@ Notebook 中交互式运行 MoonBit 代码。项目同时包含一个可独立�
 - **五个通道**：shell/control/stdin（ROUTER）、iopub（PUB）、hb（REP 心跳回显）
 - **cell 执行**：临时项目 + `moon run`，stdout/stderr 按行流式回传 iopub，
   成功/错误分别产出 execute_reply
-- 跨平台：通过 Node.js 传输层运行（Windows/macOS/Linux）
+- 跨平台：通过 Node.js 传输层运行（Windows/macOS/Linux）✨
 
 ## Quick Start
 

@@ -52,6 +52,9 @@
 - ROUTER 回复时原样回传请求携带的 identity 帧前缀（REQ/DEALER 客户端
   都能正确处理），hb 通道按 REP 语义剥掉/补上空帧后回显。
 
+> ROUTER 侧 identity 帧处理是 kernel 对接 REQ/DEALER 客户端的关键，
+> 漏传或乱序都会导致客户端挂起等待。
+
 ## cell 执行模型
 
 每个 cell 写入临时 MoonBit 项目（`moon.mod.json` + `src/main`），若 cell

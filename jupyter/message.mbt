@@ -9,6 +9,7 @@
 /// The envelope delimiter shared by every Jupyter message.
 pub let DELIMITER : Bytes = b"<IDS|MSG>"
 
+/// Jupyter wire protocol version (currently v5.4).
 let PROTOCOL_VERSION : String = "5.4"
 
 /// A parsed Jupyter message. `header`/`parent`/`metadata`/`content` are kept
