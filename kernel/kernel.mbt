@@ -9,6 +9,34 @@
 ///   hb      REP     (client: REQ)          - heartbeat echo
 
 ///|
+/// Log level for kernel operations
+pub enum LogLevel {
+  Debug
+  Info
+  Warn
+  Error
+}
+
+///|
+pub fn show_log_level(level : LogLevel) -> String {
+  match level {
+    LogLevel::Debug => "Debug"
+    LogLevel::Info => "Info"
+    LogLevel::Warn => "Warn"
+    LogLevel::Error => "Error"
+  }
+}
+
+///|
+/// Performance metrics and statistics
+priv struct PerformanceMetrics {
+  mut message_count : Int
+  execution_time : Map[String, Int] // msg_id -> milliseconds
+  mut error_count : Int
+  throughput : Map[Int, Double] // 1-minute window index -> messages seen
+}
+
+///|
 /// A connected peer on a single ZMTP socket (keyed by TCP connection id).
 priv struct Peer {
   id : Int
@@ -17,13 +45,7 @@ priv struct Peer {
 }
 
 ///|
-priv struct Channel {
-  name : String
-  socket_type : String
-  peers : Map[Int, Peer]
-}
-
-///|
+/// Enhanced kernel with logging and error tracking
 priv struct Kernel {
   key : String
   session_id : String
@@ -32,6 +54,18 @@ priv struct Kernel {
   mut exec_count : Int
   mut iopub : Peer?
   mut parent : Json?
+  start_time : Int
+  mut log_buffer : Array[String]
+  peer_stats : Map[Int, Int] // peer_id -> message_count
+  metrics : PerformanceMetrics
+  mut last_stats_report : Int
+}
+
+///|
+priv struct Channel {
+  name : String
+  socket_type : String
+  peers : Map[Int, Peer]
 }
 
 ///|
@@ -44,6 +78,16 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
     exec_count: 0,
     iopub: None,
     parent: None,
+    start_time: @nodeff.now_seconds(),
+    log_buffer: [],
+    peer_stats: Map([]),
+    metrics: {
+      message_count: 0,
+      execution_time: Map([]),
+      error_count: 0,
+      throughput: Map([]),
+    },
+    last_stats_report: 0,
   }
   let shell = Channel::new("shell", "ROUTER")
   let control = Channel::new("control", "ROUTER")
@@ -55,17 +99,23 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
   bind_channel(kernel, stdin, conn.ip, conn.stdin_port)
   bind_channel(kernel, iopub, conn.ip, conn.iopub_port)
   bind_channel(kernel, hb, conn.ip, conn.hb_port)
-  @nodeff.eprint(
-    "[moonjupyter] kernel \{kernel.session_id} listening on \{conn.ip} " +
+  
+  // Log kernel startup
+  log_kernel(kernel, LogLevel::Info, 
+    "kernel \{kernel.session_id} listening on \{conn.ip} " +
     "(shell=\{conn.shell_port} iopub=\{conn.iopub_port} stdin=\{conn.stdin_port} " +
-    "control=\{conn.control_port} hb=\{conn.hb_port})",
+    "control=\{conn.control_port} hb=\{conn.hb_port})"
   )
+  
+  // Start periodic status logging
+  @nodeff.later(30000, fn() { log_kernel_stats(kernel) })
+  @nodeff.later(60000, fn() { cleanup_inactive_peers(kernel) })
 }
 
 ///|
 fn Channel::new(name : String, socket_type : String) -> Channel {
   let peers : Map[Int, Peer] = Map([])
-  { name, socket_type, peers, }
+  { name, socket_type, peers }
 }
 
 ///|
@@ -75,20 +125,19 @@ fn bind_channel(k : Kernel, ch : Channel, ip : String, port : Int) -> Unit {
     ip,
     port,
     fn(id) {
-      let peer : Peer = {
-        id,
-        session: @zmtp.ZmtpSession::new(),
-        identities: [],
-      }
+      let peer = Peer::{ id, session: @zmtp.ZmtpSession::new(), identities: [] }
       ch.peers[id] = peer
       if ch.name == "iopub" {
         k.iopub = Some(peer)
       }
+      log_kernel(k, LogLevel::Info, "peer \{id} connected to \{ch.name} channel")
     },
     fn(id, data) {
       match ch.peers.get(id) {
         Some(peer) => on_peer_data(k, ch, peer, data)
-        None => ()
+        None => {
+          log_kernel(k, LogLevel::Warn, "received data from unknown peer \{id}")
+        }
       }
     },
     fn(id) {
@@ -101,21 +150,69 @@ fn bind_channel(k : Kernel, ch : Channel, ip : String, port : Int) -> Unit {
 }
 
 ///|
+/// Enhanced logging with level filtering
+fn log_kernel(k : Kernel, level : LogLevel, message : String) -> Unit {
+  let timestamp = @nodeff.iso_now()
+  let log_entry = "[\{timestamp}] [\{show_log_level(level)}] \{message}"
+  
+  // Add to buffer for later analysis
+  k.log_buffer.push(log_entry)
+  
+  // Keep only last 1000 log entries to prevent memory growth
+  if k.log_buffer.length() > 1000 {
+    let len = k.log_buffer.length()
+    let new_buffer : Array[String] = []
+    for i = len - 1000; i < len; i = i + 1 {
+      new_buffer.push(k.log_buffer[i])
+    }
+    k.log_buffer = new_buffer
+  }
+  
+  // Output to stderr based on level
+  match level {
+    LogLevel::Debug => @nodeff.eprint(log_entry)
+    LogLevel::Info => @nodeff.eprint(log_entry)
+    LogLevel::Warn => @nodeff.eprint(log_entry)
+    LogLevel::Error => @nodeff.eprint(log_entry)
+  }
+}
+
+///|
 fn send_raw(peer : Peer, data : Bytes) -> Unit {
+  // Log send attempts for debugging
   @nodeff.tcp_send(peer.id, data)
 }
 
 ///|
 fn on_peer_data(k : Kernel, ch : Channel, peer : Peer, data : Bytes) -> Unit {
+  peer.identities.push(data)
+  
+  // Update peer message count
+  let current_count = match k.peer_stats.get(peer.id) {
+    Some(count) => count
+    None => 0
+  }
+  k.peer_stats[peer.id] = current_count + 1
+  
   let events = peer.session.feed(data)
   for ev in events {
     match ev {
-      @zmtp.PeerGreeting => send_raw(peer, @zmtp.ready_command(ch.socket_type))
+      @zmtp.PeerGreeting => {
+        log_kernel(k, LogLevel::Debug, "peer \{peer.id} greeting on \{ch.name}")
+        send_raw(peer, @zmtp.ready_command(ch.socket_type))
+      }
       @zmtp.PeerReady(_) => ()
-      @zmtp.PingReceived(context) => send_raw(peer, @zmtp.pong_command(context))
-      @zmtp.Error(reason) =>
-        @nodeff.eprint("[moonjupyter] \{ch.name}: \{reason}")
-      @zmtp.Message(frames) => handle_message(k, ch, peer, frames)
+      @zmtp.PingReceived(context) => {
+        log_kernel(k, LogLevel::Debug, "ping from peer \{peer.id} on \{ch.name}")
+        send_raw(peer, @zmtp.pong_command(context))
+      }
+      @zmtp.Error(reason) => {
+        log_kernel(k, LogLevel::Error, "peer \{peer.id} error on \{ch.name}: \{reason}")
+      }
+      @zmtp.Message(frames) => {
+        log_kernel(k, LogLevel::Debug, "peer \{peer.id} message on \{ch.name}: \{frames.length()} frames")
+        handle_message(k, ch, peer, frames)
+      }
     }
   }
 }
@@ -127,8 +224,12 @@ fn handle_message(
   peer : Peer,
   frames : Array[Bytes],
 ) -> Unit {
+  let started = @nodeff.now_seconds()
+  record_message_metrics(k, started)
+
   if ch.name == "iopub" {
     // SUB subscription frames; nothing to do.
+    log_kernel(k, LogLevel::Debug, "iopub subscription from peer \{peer.id}")
     return
   }
   if ch.name == "hb" {
@@ -150,8 +251,14 @@ fn handle_message(
     return
   }
   match @jupyter.parse_message(frames, k.key, @nodeff.inflate) {
-    Err(e) => @nodeff.eprint("[moonjupyter] \{ch.name}: \{e}")
+    Err(e) => {
+      k.metrics.error_count = k.metrics.error_count + 1
+      log_kernel(k, LogLevel::Error, "failed to parse message on \{ch.name}: \{e}")
+      @nodeff.eprint("[moonjupyter] \{ch.name}: \{e}")
+    }
     Ok(msg) => {
+      // Log message handling
+      log_kernel(k, LogLevel::Debug, "handling \{msg.msg_type} on \{ch.name}")
       // Remember the routing prefix so replies reach the right client.
       let idents : Array[Bytes] = []
       for f in msg.identities {
@@ -279,7 +386,10 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
   let count = k.exec_count + 1
   k.exec_count = count
   k.parent = Some(msg.header)
+  
   let code = @jupyter.jstr_field(msg.content, "code")
+  log_kernel(k, LogLevel::Info, "executing cell \{count}: \{code}")
+  
   publish(
     k,
     "status",
@@ -293,8 +403,10 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
       ("execution_count", Json::number(count.to_double())),
     ]),
   )
+  
   run_cell(k, code, fn(ok, ename, evalue, traceback) {
     if ok {
+      log_kernel(k, LogLevel::Info, "cell \{count} executed successfully")
       reply(
         k,
         peer,
@@ -309,6 +421,7 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
         msg,
       )
     } else {
+      log_kernel(k, LogLevel::Error, "cell \{count} failed: \{ename} - \{evalue}")
       reply(
         k,
         peer,
@@ -430,6 +543,129 @@ fn last_lines(buf : String, count : Int) -> String {
     sel.push(lines[i])
   }
   sel.join("\n")
+}
+
+///|
+/// Log kernel statistics periodically
+fn log_kernel_stats(k : Kernel) -> Unit {
+  let uptime = @nodeff.now_seconds() - k.start_time
+  let mut total_messages = 0
+  for _, count in k.peer_stats {
+    total_messages = total_messages + count
+  }
+  let active_peers = k.peer_stats.length()
+  let log_entries = k.log_buffer.length()
+
+  log_kernel(
+    k,
+    LogLevel::Info,
+    "stats: uptime=\{uptime}s peers=\{active_peers} total_msgs=\{total_messages} " +
+    "logs=\{log_entries} execs=\{k.exec_count} errors=\{k.metrics.error_count}",
+  )
+
+  // Log detailed performance stats at most every 5 minutes
+  let now = @nodeff.now_seconds()
+  if k.last_stats_report == 0 || now - k.last_stats_report > 300 {
+    k.last_stats_report = now
+    let perf_stats = get_performance_stats(k)
+    let avg_time = jnum_field(perf_stats, "average_execution_ms")
+    let throughput = jnum_field(perf_stats, "current_throughput_per_min")
+    let error_rate = jnum_field(perf_stats, "error_rate_percent")
+
+    log_kernel(
+      k,
+      LogLevel::Info,
+      "performance: avg_time=\{avg_time}ms throughput=\{throughput}/min error_rate=\{error_rate}%",
+    )
+  }
+}
+
+///|
+/// Read a numeric field out of a JSON object, defaulting to 0.
+fn jnum_field(j : Json, key : String) -> Double {
+  match j {
+    Json::Object(fields) =>
+      match fields.get(key) {
+        Some(Json::Number(v, ..)) => v
+        _ => 0.0
+      }
+    _ => 0.0
+  }
+}
+
+///|
+/// Clean up inactive peers to prevent memory leaks
+fn cleanup_inactive_peers(k : Kernel) -> Unit {
+  // Clean up old log entries
+  if k.log_buffer.length() > 500 {
+    let len = k.log_buffer.length()
+    let new_buffer : Array[String] = []
+    for i = len - 500; i < len; i = i + 1 {
+      new_buffer.push(k.log_buffer[i])
+    }
+    k.log_buffer = new_buffer
+  }
+
+  // Clean up old performance metrics
+  if k.metrics.execution_time.length() > 1000 {
+    // Keep only last 1000 execution times
+    let keys = k.metrics.execution_time.keys().to_array()
+    for i = 0; i < keys.length() - 1000; i = i + 1 {
+      k.metrics.execution_time.remove(keys[i])
+    }
+  }
+
+  // Log maintenance activity
+  log_kernel(k, LogLevel::Debug, "cleanup: checked \{k.peer_stats.length()} peers")
+}
+
+///|
+/// Record performance metrics for message handling
+fn record_message_metrics(k : Kernel, now : Int) -> Unit {
+  k.metrics.message_count = k.metrics.message_count + 1
+
+  // Count messages per 1-minute window (rolling over 60 windows)
+  let window = now / 60
+  let current : Double = match k.metrics.throughput.get(window % 60) {
+    Some(rate) => rate + 1.0
+    None => 1.0
+  }
+  k.metrics.throughput[window % 60] = current
+}
+
+///|
+/// Get current performance statistics
+fn get_performance_stats(k : Kernel) -> Json {
+  let uptime = @nodeff.now_seconds() - k.start_time
+  let avg_execution_time = if k.metrics.execution_time.length() > 0 {
+    let mut total_time = 0
+    for _, ms in k.metrics.execution_time {
+      total_time = total_time + ms
+    }
+    total_time.to_double() / k.metrics.execution_time.length().to_double()
+  } else {
+    0.0
+  }
+  let mut current_throughput = 0.0
+  for _, rate in k.metrics.throughput {
+    current_throughput = current_throughput + rate
+  }
+  let error_rate = if k.metrics.message_count > 0 {
+    (k.metrics.error_count.to_double() / k.metrics.message_count.to_double()) * 100.0
+  } else {
+    0.0
+  }
+
+  @jupyter.obj([
+    ("uptime_seconds", Json::number(uptime.to_double())),
+    ("total_messages", Json::number(k.metrics.message_count.to_double())),
+    ("total_errors", Json::number(k.metrics.error_count.to_double())),
+    ("average_execution_ms", Json::number(avg_execution_time)),
+    ("current_throughput_per_min", Json::number(current_throughput)),
+    ("error_rate_percent", Json::number(error_rate)),
+    ("active_peers", Json::number(k.peer_stats.length().to_double())),
+    ("log_entries", Json::number(k.log_buffer.length().to_double())),
+  ])
 }
 
 ///|

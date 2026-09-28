@@ -103,6 +103,10 @@ extern "js" fn js_iso_now() -> String =
   #|(() => new Date().toISOString())
 
 ///|
+extern "js" fn js_now_ms() -> Int =
+  #|(() => Date.now())
+
+///|
 extern "js" fn js_username() -> String =
   #|(() => process.env.USER || process.env.USERNAME || "user")
 
@@ -234,6 +238,12 @@ pub fn spawn_process(
 ///|
 pub fn iso_now() -> String {
   js_iso_now()
+}
+
+///|
+/// Wall-clock time as Unix epoch seconds.
+pub fn now_seconds() -> Int {
+  js_now_ms() / 1000
 }
 
 ///|

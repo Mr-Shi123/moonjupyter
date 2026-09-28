@@ -172,6 +172,12 @@ fn maybe_inflate(b : Bytes, inflate : (Bytes) -> Bytes) -> Bytes {
 }
 
 ///|
+/// Maximum accepted size of a single message part, in bytes. Guards the
+/// kernel against oversized (accidental or malicious) frames before they
+/// reach JSON parsing or HMAC.
+const MAX_PART_SIZE : Int = 16 * 1024 * 1024
+
+///|
 /// Parse a full ROUTER-side message: [identities..., delimiter, sig,
 /// header, parent, metadata, content]. `inflate` decompresses zlib parts.
 pub fn parse_message(
@@ -179,6 +185,7 @@ pub fn parse_message(
   key : String,
   inflate : (Bytes) -> Bytes,
 ) -> Result[JMsg, String] {
+  // Find delimiter
   let mut di = -1
   for i = 0; i < frames.length(); i = i + 1 {
     if @bx.bytes_equal(frames[i], delimiter) {
@@ -191,6 +198,11 @@ pub fn parse_message(
   }
   if frames.length() < di + 6 {
     return Err("truncated message: expected 5 frames after delimiter")
+  }
+  for i = di + 1; i < frames.length(); i = i + 1 {
+    if frames[i].length() > MAX_PART_SIZE {
+      return Err("message part \{i - di} exceeds \{MAX_PART_SIZE} bytes")
+    }
   }
   let identities : Array[Bytes] = []
   for i = 0; i < di; i = i + 1 {
@@ -243,8 +255,7 @@ pub fn parse_connection(s : String) -> Result[ConnectionInfo, String] {
   }
   let shell_port = match jget(j, "shell_port") {
     Some(Json::Number(d, ..)) => d.to_int()
-    Some(_) => return miss("shell_port")
-    None => return miss("shell_port")
+    _ => return miss("shell_port")
   }
   let control_port = match jget(j, "control_port") {
     Some(Json::Number(d, ..)) => d.to_int()
@@ -262,7 +273,15 @@ pub fn parse_connection(s : String) -> Result[ConnectionInfo, String] {
     Some(Json::Number(d, ..)) => d.to_int()
     _ => return miss("hb_port")
   }
-  Ok({ ip, shell_port, control_port, stdin_port, iopub_port, hb_port, key, })
+  Ok({
+    ip,
+    shell_port,
+    control_port,
+    stdin_port,
+    iopub_port,
+    hb_port,
+    key,
+  })
 }
 
 ///|
