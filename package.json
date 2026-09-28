@@ -1,0 +1,12 @@
+{
+  "name": "moonjupyter",
+  "version": "1.0.0",
+  "description": "MoonBit Jupyter Kernel",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["moonbit", "jupyter", "kernel"],
+  "author": "",
+  "license": "MIT"
+}
