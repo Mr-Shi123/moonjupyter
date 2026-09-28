@@ -1,8 +1,0 @@
-{
-  "import": [
-    {
-      "path": "moonjupyter/moonjupyter/bytesx",
-      "alias": "bx"
-    }
-  ]
-}

@@ -109,7 +109,7 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 ## Publishing to mooncakes.io
 
-发布前把 `moon.mod.json` 里的 repository URL
+发布前把 `moon.mod` 里的 repository URL
 改为你的 GitHub 用户名，然后 `moon publish`。`zmtp` 包可独立作为
 `<user>/moonjupyter/zmtp` 被其他项目引用。
 

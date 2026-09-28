@@ -1,0 +1,10 @@
+import {
+  "moonjupyter/moonjupyter/jupyter",
+  "moonjupyter/moonjupyter/kernel",
+  "moonjupyter/moonjupyter/nodeff",
+}
+
+options(
+  "is-main": true,
+  link: { "js": { "format": "cjs" } },
+)

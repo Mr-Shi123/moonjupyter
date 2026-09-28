@@ -5,11 +5,20 @@
 /// `ZmtpSession::feed` and receives events; outgoing wire bytes are produced
 /// by the pure encoding functions below.
 
+///|
 /// Frame flag bits (ZMTP 3.1 spec, section 3.1).
-const FLAG_MORE = 0x01    /// more frames follow before message boundary
-const FLAG_LONG = 0x02    /// long 64-bit size encoding instead of 8-bit
-const FLAG_COMMAND = 0x04 /// this frame is a COMMAND, not a MESSAGE
+/// more frames follow before message boundary
+/// long 64-bit size encoding instead of 8-bit
+/// this frame is a COMMAND, not a MESSAGE
+const FLAG_MORE = 0x01
 
+///|
+const FLAG_LONG = 0x02
+
+///|
+const FLAG_COMMAND = 0x04
+
+///|
 /// Events produced by feeding wire bytes into a session.
 pub(all) enum ZmtpEvent {
   /// The peer greeting was received; the host should now send `ready_command`.
@@ -24,6 +33,7 @@ pub(all) enum ZmtpEvent {
   Error(String)
 }
 
+///|
 enum ZState {
   AwGreet
   AwReady
@@ -31,8 +41,10 @@ enum ZState {
   Closed
 } derive(Eq)
 
+///|
 pub extend ZState with Eq::{not_equal, equal}
 
+///|
 /// One connection's parse-side state. Construct with `ZmtpSession::new`.
 pub struct ZmtpSession {
   mut state : ZState
@@ -41,42 +53,42 @@ pub struct ZmtpSession {
   mut pending : Array[Bytes]
 }
 
+///|
 pub fn ZmtpSession::new() -> ZmtpSession {
-  { state: AwGreet, buf: [], pos: 0, pending: [] }
+  { state: AwGreet, buf: [], pos: 0, pending: [], }
 }
 
+///|
 priv struct ZFrame {
   flags : Int
   body : Array[Byte]
 }
 
+///|
 /// Build the 64-byte ZMTP greeting.
 /// Magic `0xFF` + 8 zero bytes + `0x7F` + version + mechanism + as-server flag.
 pub fn greeting_bytes(as_server : Bool) -> Bytes {
   let out : Array[Byte] = []
-  out.push(@bx.u8(0xFF))       /// 0xFF magic byte
+  out.push(@bx.u8(0xFF)) /// 0xFF magic byte
   for _i = 0; _i < 8; _i = _i + 1 {
-    out.push(@bx.u8(0))       /// 8-byte long size placeholder
+    out.push(@bx.u8(0)) /// 8-byte long size placeholder
   }
-  out.push(@bx.u8(0x7F))       /// version-present flag
-  out.push(@bx.u8(3))         /// version major
-  out.push(@bx.u8(1))         /// version minor
+  out.push(@bx.u8(0x7F)) /// version-present flag
+  out.push(@bx.u8(3)) /// version major
+  out.push(@bx.u8(1)) /// version minor
   // mechanism "NULL" padded to 20 bytes
   push_str(out, "NULL")
   for _i = 0; _i < 16; _i = _i + 1 {
     out.push(@bx.u8(0))
   }
-  out.push(@bx.u8(if as_server {
-    1
-  } else {
-    0
-  }))
+  out.push(@bx.u8(if as_server { 1 } else { 0 }))
   for _i = 0; _i < 31; _i = _i + 1 {
     out.push(@bx.u8(0))
   }
   Bytes::from_array(out)
 }
 
+///|
 /// Build the READY handshake command announcing our socket type.
 /// READY command: FRAME(flags=COMMAND, body="READY\x00\x00\x00\x05Socket-Type<4-byte-len><type>")
 pub fn ready_command(socket_type : String) -> Bytes {
@@ -95,6 +107,7 @@ pub fn ready_command(socket_type : String) -> Bytes {
   frame_bytes(Bytes::from_array(body), false, true)
 }
 
+///|
 /// Build a PONG command replying to a PING with the same context.
 pub fn pong_command(context : Bytes) -> Bytes {
   let body : Array[Byte] = []
@@ -106,6 +119,7 @@ pub fn pong_command(context : Bytes) -> Bytes {
   frame_bytes(Bytes::from_array(body), false, true)
 }
 
+///|
 /// Encode a multi-frame message into wire bytes (MORE on all but last frame).
 pub fn encode_message(parts : Array[Bytes]) -> Bytes {
   let frames : Array[Bytes] = []
@@ -116,12 +130,14 @@ pub fn encode_message(parts : Array[Bytes]) -> Bytes {
   @bx.concat(frames)
 }
 
+///|
 fn push_str(out : Array[Byte], s : String) -> Unit {
   for i = 0; i < s.length(); i = i + 1 {
     out.push(@bx.u8(s.code_unit_at(i).to_int()))
   }
 }
 
+///|
 fn frame_bytes(body : Bytes, more : Bool, command : Bool) -> Bytes {
   let out : Array[Byte] = []
   let mut flags = 0
@@ -148,6 +164,7 @@ fn frame_bytes(body : Bytes, more : Bool, command : Bool) -> Bytes {
   Bytes::from_array(out)
 }
 
+///|
 pub fn ZmtpSession::feed(self : ZmtpSession, data : Bytes) -> Array[ZmtpEvent] {
   for i = 0; i < data.length(); i = i + 1 {
     self.buf.push(data[i])
@@ -234,6 +251,7 @@ pub fn ZmtpSession::feed(self : ZmtpSession, data : Bytes) -> Array[ZmtpEvent] {
   events
 }
 
+///|
 fn ZmtpSession::try_greeting(self : ZmtpSession) -> String? {
   let base = self.pos
   if self.buf[base].to_int() != 0xFF || self.buf[base + 9].to_int() != 0x7F {
@@ -259,6 +277,7 @@ fn ZmtpSession::try_greeting(self : ZmtpSession) -> String? {
   Some(mech)
 }
 
+///|
 fn ZmtpSession::try_frame(self : ZmtpSession) -> ZFrame? {
   let base = self.pos
   let avail = self.buf.length() - base
@@ -269,14 +288,18 @@ fn ZmtpSession::try_frame(self : ZmtpSession) -> ZFrame? {
   let mut hdr = 2
   let mut size = 0
   if (flags & FLAG_LONG) != 0 {
-    if avail < 10 {
+    // LONG frame: 1 flags byte + 8-byte big-endian size + body.
+    if avail < 9 {
       return None
     }
     for i = 0; i < 8; i = i + 1 {
-      size = (size << 8) | self.buf[base + 2 + i].to_int()
+      size = (size << 8) | self.buf[base + 1 + i].to_int()
     }
-    hdr = 10
+    hdr = 9
   } else {
+    if avail < 2 {
+      return None
+    }
     size = self.buf[base + 1].to_int()
   }
   if avail < hdr + size {
@@ -287,9 +310,10 @@ fn ZmtpSession::try_frame(self : ZmtpSession) -> ZFrame? {
     body.push(self.buf[base + hdr + i])
   }
   self.pos = base + hdr + size
-  Some({ flags, body })
+  Some({ flags, body, })
 }
 
+///|
 /// The command name is a length-prefixed string at the start of the body.
 fn command_name(body : Array[Byte]) -> String? {
   if body.length() < 1 {
@@ -306,6 +330,7 @@ fn command_name(body : Array[Byte]) -> String? {
   Some(s)
 }
 
+///|
 /// Extract the Socket-Type property from a READY body.
 fn ready_socket_type(body : Array[Byte]) -> String {
   let mut i = 1 + 5 // skip name-length + "READY"
@@ -323,10 +348,10 @@ fn ready_socket_type(body : Array[Byte]) -> String {
       key = key + @bx.char_str(body[i + 1 + j].to_int())
     }
     i = i + 1 + klen
-    let vlen = (body[i].to_int() << 24)
-      | (body[i + 1].to_int() << 16)
-      | (body[i + 2].to_int() << 8)
-      | body[i + 3].to_int()
+    let vlen = (body[i].to_int() << 24) |
+      (body[i + 1].to_int() << 16) |
+      (body[i + 2].to_int() << 8) |
+      body[i + 3].to_int()
     i = i + 4
     if i + vlen > n {
       break
@@ -343,6 +368,7 @@ fn ready_socket_type(body : Array[Byte]) -> String {
   ""
 }
 
+///|
 /// PING body: name-length + "PING" + 2-byte TTL + context.
 fn ping_context(body : Array[Byte]) -> Bytes {
   if body.length() > 7 {
@@ -356,6 +382,7 @@ fn ping_context(body : Array[Byte]) -> Bytes {
   }
 }
 
+///|
 test "handshake" {
   let s = ZmtpSession::new()
   let events = s.feed(greeting_bytes(true))
@@ -371,6 +398,7 @@ test "handshake" {
   }
 }
 
+///|
 test "message roundtrip" {
   let s = ZmtpSession::new()
   let _ = s.feed(greeting_bytes(true))
@@ -386,6 +414,7 @@ test "message roundtrip" {
   }
 }
 
+///|
 test "byte-by-byte feed and long frames" {
   let s = ZmtpSession::new()
   let g = greeting_bytes(true)

@@ -6,12 +6,15 @@
 /// 0x78 zlib header byte) and are decompressed through an injected `inflate`
 /// function so this package stays transport/backend independent.
 
+///|
 /// The envelope delimiter shared by every Jupyter message.
 pub let delimiter : Bytes = b"<IDS|MSG>"
 
+///|
 /// Jupyter wire protocol version (currently v5.4).
 const PROTOCOL_VERSION = "5.4"
 
+///|
 /// A parsed Jupyter message. `header`/`parent`/`metadata`/`content` are kept
 /// as raw JSON so replies can echo the parent header verbatim.
 pub(all) struct JMsg {
@@ -23,6 +26,7 @@ pub(all) struct JMsg {
   msg_type : String
 }
 
+///|
 /// A parsed kernel connection file (kernel-<id>.json).
 /// Matches Jupyter Client's `connection_info` dict exactly.
 pub(all) struct ConnectionInfo {
@@ -35,8 +39,8 @@ pub(all) struct ConnectionInfo {
   key : String
 }
 
+///|
 /// ---- JSON helpers ----
-
 pub fn jget(j : Json, k : String) -> Json? {
   match j {
     Json::Object(m) => m.get(k)
@@ -44,6 +48,7 @@ pub fn jget(j : Json, k : String) -> Json? {
   }
 }
 
+///|
 pub fn jstr(j : Json) -> String {
   match j {
     Json::String(s) => s
@@ -51,6 +56,7 @@ pub fn jstr(j : Json) -> String {
   }
 }
 
+///|
 pub fn jstr_field(j : Json, k : String) -> String {
   match jget(j, k) {
     Some(v) => jstr(v)
@@ -58,13 +64,15 @@ pub fn jstr_field(j : Json, k : String) -> String {
   }
 }
 
+///|
 pub fn jint_field(j : Json, k : String) -> Int {
   match jget(j, k) {
-    Some(Json::Number(d)) => d.to_int()
+    Some(Json::Number(d, ..)) => d.to_int()
     _ => 0
   }
 }
 
+///|
 /// Build a JSON object from key/value pairs.
 pub fn obj(pairs : Array[(String, Json)]) -> Json {
   let m : Map[String, Json] = Map([])
@@ -76,6 +84,7 @@ pub fn obj(pairs : Array[(String, Json)]) -> Json {
 
 /// ---- identity / time ----
 
+///|
 /// Format 16 random bytes as a v4 UUID string (version/variant bits set).
 pub fn uuid_v4_from(b : Bytes) -> String {
   let out : Array[Byte] = []
@@ -89,12 +98,18 @@ pub fn uuid_v4_from(b : Bytes) -> String {
   out[8] = @bx.u8((out[8].to_int() & 0x3F) | 0x80)
   let hex = @bx.hex_encode(Bytes::from_array(out))
   // 8-4-4-4-12
-  "\{@bx.slice(hex, 0, 8)}-\{@bx.slice(hex, 8, 12)}-\{@bx.slice(hex, 12, 16)}-\{@bx.slice(hex, 16, 20)}-\{@bx.slice(hex, 20, 32)}"
+  "\{@bx.sslice(hex, 0, 8)}-\{@bx.sslice(hex, 8, 12)}-\{@bx.sslice(hex, 12, 16)}-\{@bx.sslice(hex, 16, 20)}-\{@bx.sslice(hex, 20, 32)}"
 }
 
+///|
 /// ---- signing ----
-
-pub fn sign(key : String, header_b : Bytes, parent_b : Bytes, meta_b : Bytes, content_b : Bytes) -> String {
+pub fn sign(
+  key : String,
+  header_b : Bytes,
+  parent_b : Bytes,
+  meta_b : Bytes,
+  content_b : Bytes,
+) -> String {
   if key == "" {
     return ""
   }
@@ -107,8 +122,15 @@ pub fn sign(key : String, header_b : Bytes, parent_b : Bytes, meta_b : Bytes, co
 
 /// ---- outgoing messages ----
 
+///|
 /// Build a message header (new msg id, protocol 5.4).
-pub fn new_header(session_id : String, username : String, date : String, msg_type : String, msg_id : String) -> Json {
+pub fn new_header(
+  session_id : String,
+  username : String,
+  date : String,
+  msg_type : String,
+  msg_id : String,
+) -> Json {
   obj([
     ("msg_id", Json::string(msg_id)),
     ("session", Json::string(session_id)),
@@ -119,6 +141,7 @@ pub fn new_header(session_id : String, username : String, date : String, msg_typ
   ])
 }
 
+///|
 /// Serialize header/parent/metadata/content into the 6 wire frames that
 /// follow the identity frames: [delimiter, sig, header, parent, meta, content].
 /// Outgoing parts are sent uncompressed; the signature is over the exact
@@ -130,23 +153,16 @@ pub fn build_frames(
   metadata : Json,
   content : Json,
 ) -> Array[Bytes] {
-  let header_b = @bx.utf8_encode(@json.stringify(header))
-  let parent_b = @bx.utf8_encode(@json.stringify(parent))
-  let meta_b = @bx.utf8_encode(@json.stringify(metadata))
-  let content_b = @bx.utf8_encode(@json.stringify(content))
+  let header_b = @bx.utf8_encode(header.stringify())
+  let parent_b = @bx.utf8_encode(parent.stringify())
+  let meta_b = @bx.utf8_encode(metadata.stringify())
+  let content_b = @bx.utf8_encode(content.stringify())
   let sig = sign(key, header_b, parent_b, meta_b, content_b)
-  [
-    delimiter,
-    @bx.utf8_encode(sig),
-    header_b,
-    parent_b,
-    meta_b,
-    content_b,
-  ]
+  [delimiter, @bx.utf8_encode(sig), header_b, parent_b, meta_b, content_b]
 }
 
+///|
 /// ---- incoming messages ----
-
 fn maybe_inflate(b : Bytes, inflate : (Bytes) -> Bytes) -> Bytes {
   if b.length() > 0 && b[0].to_int() == 0x78 {
     inflate(b)
@@ -155,9 +171,14 @@ fn maybe_inflate(b : Bytes, inflate : (Bytes) -> Bytes) -> Bytes {
   }
 }
 
+///|
 /// Parse a full ROUTER-side message: [identities..., delimiter, sig,
 /// header, parent, metadata, content]. `inflate` decompresses zlib parts.
-pub fn parse_message(frames : Array[Bytes], key : String, inflate : (Bytes) -> Bytes) -> Result[JMsg, String] {
+pub fn parse_message(
+  frames : Array[Bytes],
+  key : String,
+  inflate : (Bytes) -> Bytes,
+) -> Result[JMsg, String] {
   let mut di = -1
   for i = 0; i < frames.length(); i = i + 1 {
     if @bx.bytes_equal(frames[i], delimiter) {
@@ -204,12 +225,14 @@ pub fn parse_message(frames : Array[Bytes], key : String, inflate : (Bytes) -> B
   }
 }
 
+///|
 /// ---- connection file ----
-
 pub fn parse_connection(s : String) -> Result[ConnectionInfo, String] {
   let j = try @json.parse(s) catch {
     e => return Err("invalid connection JSON: \{e.to_string()}")
-  } noraise { j => j }
+  } noraise {
+    j => j
+  }
   let ip = match jget(j, "ip") {
     Some(v) => jstr(v)
     None => "127.0.0.1"
@@ -219,31 +242,31 @@ pub fn parse_connection(s : String) -> Result[ConnectionInfo, String] {
     Err("connection file missing field: \{name}")
   }
   let shell_port = match jget(j, "shell_port") {
-    Some(Json::Number(d)) => d.to_int()
+    Some(Json::Number(d, ..)) => d.to_int()
     Some(_) => return miss("shell_port")
     None => return miss("shell_port")
   }
   let control_port = match jget(j, "control_port") {
-    Some(Json::Number(d)) => d.to_int()
+    Some(Json::Number(d, ..)) => d.to_int()
     _ => return miss("control_port")
   }
   let stdin_port = match jget(j, "stdin_port") {
-    Some(Json::Number(d)) => d.to_int()
+    Some(Json::Number(d, ..)) => d.to_int()
     _ => return miss("stdin_port")
   }
   let iopub_port = match jget(j, "iopub_port") {
-    Some(Json::Number(d)) => d.to_int()
+    Some(Json::Number(d, ..)) => d.to_int()
     _ => return miss("iopub_port")
   }
   let hb_port = match jget(j, "hb_port") {
-    Some(Json::Number(d)) => d.to_int()
+    Some(Json::Number(d, ..)) => d.to_int()
     _ => return miss("hb_port")
   }
-  Ok({ ip, shell_port, control_port, stdin_port, iopub_port, hb_port, key })
+  Ok({ ip, shell_port, control_port, stdin_port, iopub_port, hb_port, key, })
 }
 
+///|
 /// ---- tests ----
-
 test "uuid format" {
   let b : Array[Byte] = []
   for i = 0; i < 16; i = i + 1 {
@@ -252,15 +275,18 @@ test "uuid format" {
   let u = uuid_v4_from(Bytes::from_array(b))
   // 00000000-0004-0..-8...-............
   assert_eq(u.length(), 36)
-  assert_eq(@bx.slice(u, 8, 9), "-")
-  assert_eq(@bx.slice(u, 13, 14), "-")
-  assert_eq(@bx.slice(u, 18, 19), "-")
-  assert_eq(@bx.slice(u, 23, 24), "-")
-  assert_eq(@bx.slice(u, 14, 15), "4")
+  assert_eq(@bx.sslice(u, 8, 9), "-")
+  assert_eq(@bx.sslice(u, 13, 14), "-")
+  assert_eq(@bx.sslice(u, 18, 19), "-")
+  assert_eq(@bx.sslice(u, 23, 24), "-")
+  assert_eq(@bx.sslice(u, 14, 15), "4")
 }
 
+///|
 test "build and parse roundtrip" {
-  let header = new_header("sess", "user", "2026-01-01T00:00:00Z", "kernel_info_request", "id-1")
+  let header = new_header(
+    "sess", "user", "2026-01-01T00:00:00Z", "kernel_info_request", "id-1",
+  )
   let parent = obj([])
   let metadata = obj([])
   let content = obj([])
@@ -269,35 +295,35 @@ test "build and parse roundtrip" {
   for f in frames {
     full.push(f)
   }
-  let noop = fn(b : Bytes) -> Bytes {
-    b
-  }
+  let noop = fn(b : Bytes) -> Bytes { b }
   match parse_message(full, "secret", noop) {
     Ok(msg) => {
       assert_eq(msg.msg_type, "kernel_info_request")
       assert_eq(msg.identities.length(), 2)
       assert_eq(jstr_field(msg.header, "session"), "sess")
     }
-    Err(e) => assert_true(false)
+    Err(_e) => assert_true(false)
   }
 }
 
+///|
 test "bad signature rejected" {
-  let header = new_header("sess", "user", "2026-01-01T00:00:00Z", "execute_request", "id-2")
+  let header = new_header(
+    "sess", "user", "2026-01-01T00:00:00Z", "execute_request", "id-2",
+  )
   let frames = build_frames("k1", header, obj([]), obj([]), obj([]))
   let full : Array[Bytes] = [b"i"]
   for f in frames {
     full.push(f)
   }
-  let noop = fn(b : Bytes) -> Bytes {
-    b
-  }
+  let noop = fn(b : Bytes) -> Bytes { b }
   match parse_message(full, "other-key", noop) {
     Ok(_) => assert_true(false)
     Err(_) => ()
   }
 }
 
+///|
 test "parse connection file" {
   let raw = "{\"shell_port\": 1, \"iopub_port\": 2, \"stdin_port\": 3, \"control_port\": 4, \"hb_port\": 5, \"ip\": \"127.0.0.1\", \"transport\": \"tcp\", \"signature_scheme\": \"hmac-sha256\", \"key\": \"a-key\"}"
   match parse_connection(raw) {

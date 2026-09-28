@@ -1,10 +1,12 @@
 /// Byte-level helpers shared across the moonjupyter packages.
 
+///|
 /// Convert an Int (0..255) to a Byte.
 pub fn u8(i : Int) -> Byte {
   i.to_byte()
 }
 
+///|
 /// Concatenate a list of byte strings.
 pub fn concat(parts : Array[Bytes]) -> Bytes {
   let out : Array[Byte] = []
@@ -16,21 +18,27 @@ pub fn concat(parts : Array[Bytes]) -> Bytes {
   Bytes::from_array(out)
 }
 
+///|
 /// Copy a byte range [start, end) into a new Bytes.
 /// If `end` exceeds the byte length the slice is truncated to EOF.
 pub fn slice(b : Bytes, start : Int, end : Int) -> Bytes {
   let out : Array[Byte] = []
-  let hi = if end < b.length() {
-    end
-  } else {
-    b.length()
-  }
+  let hi = if end < b.length() { end } else { b.length() }
   for i = start; i < hi; i = i + 1 {
     out.push(b[i])
   }
   Bytes::from_array(out)
 }
 
+///|
+/// Copy a string range [start, end) into a new String.
+/// If `end` exceeds the string length the slice is truncated.
+pub fn sslice(s : String, start : Int, end : Int) -> String {
+  let hi = if end < s.length() { end } else { s.length() }
+  s[start:hi].to_owned()
+}
+
+///|
 /// Equality of two byte strings (length then element-wise short-circuit).
 pub fn bytes_equal(a : Bytes, b : Bytes) -> Bool {
   if a.length() != b.length() {
@@ -44,12 +52,14 @@ pub fn bytes_equal(a : Bytes, b : Bytes) -> Bool {
   true
 }
 
+///|
 /// Build a single-character string from a Unicode code point (BMP, no surrogate handling).
 pub fn char_str(cp : Int) -> String {
   let c = Int::unsafe_to_char(cp)
   "\{c}"
 }
 
+///|
 /// UTF-8 encode a string.
 pub fn utf8_encode(s : String) -> Bytes {
   let out : Array[Byte] = []
@@ -90,6 +100,7 @@ pub fn utf8_encode(s : String) -> Bytes {
   Bytes::from_array(out)
 }
 
+///|
 /// Decode UTF-8 bytes into a string. Invalid sequences become U+FFFD.
 pub fn utf8_decode(b : Bytes) -> String {
   let mut s = ""
@@ -105,13 +116,15 @@ pub fn utf8_decode(b : Bytes) -> String {
       cp = ((c & 0x1F) << 6) | (b[i + 1].to_int() & 0x3F)
       i = i + 2
     } else if c >= 0xE0 && c < 0xF0 && i + 2 < n {
-      cp = ((c & 0x0F) << 12) | ((b[i + 1].to_int() & 0x3F) << 6) | (b[i + 2].to_int() & 0x3F)
+      cp = ((c & 0x0F) << 12) |
+        ((b[i + 1].to_int() & 0x3F) << 6) |
+        (b[i + 2].to_int() & 0x3F)
       i = i + 3
     } else if c >= 0xF0 && i + 3 < n {
-      cp = ((c & 0x07) << 18)
-        | ((b[i + 1].to_int() & 0x3F) << 12)
-        | ((b[i + 2].to_int() & 0x3F) << 6)
-        | (b[i + 3].to_int() & 0x3F)
+      cp = ((c & 0x07) << 18) |
+        ((b[i + 1].to_int() & 0x3F) << 12) |
+        ((b[i + 2].to_int() & 0x3F) << 6) |
+        (b[i + 3].to_int() & 0x3F)
       i = i + 4
     } else {
       i = i + 1
@@ -125,6 +138,7 @@ pub fn utf8_decode(b : Bytes) -> String {
   s
 }
 
+///|
 /// Lowercase hex encoding.
 pub fn hex_encode(b : Bytes) -> String {
   let digits = "0123456789abcdef"
@@ -138,15 +152,18 @@ pub fn hex_encode(b : Bytes) -> String {
   s
 }
 
+///|
 test "utf8 roundtrip" {
   let s = "héllo wörld 你好 🥮"
   assert_eq(utf8_decode(utf8_encode(s)), s)
 }
 
+///|
 test "hex" {
   assert_eq(hex_encode(utf8_encode("ABC")), "414243")
 }
 
+///|
 test "concat and slice" {
   let a = utf8_encode("hello ")
   let b = utf8_encode("world")

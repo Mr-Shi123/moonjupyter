@@ -8,28 +8,33 @@
 ///   iopub   PUB                            - output broadcast
 ///   hb      REP     (client: REQ)          - heartbeat echo
 
+///|
 /// A connected peer on a single ZMTP socket (keyed by TCP connection id).
-struct Peer {
+priv struct Peer {
   id : Int
   session : @zmtp.ZmtpSession
   mut identities : Array[Bytes]
 }
 
-struct Channel {
+///|
+priv struct Channel {
   name : String
   socket_type : String
   peers : Map[Int, Peer]
 }
 
-struct Kernel {
+///|
+priv struct Kernel {
   key : String
   session_id : String
   username : String
-  mut exec_count : Int  /// incremented on each execute_reply (Jupyter spec §4.3)
+  /// incremented on each execute_reply (Jupyter spec §4.3)
+  mut exec_count : Int
   mut iopub : Peer?
   mut parent : Json?
 }
 
+///|
 pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
   // Per-kernel session: one shell ROUTER, one iopub PUB, one REP hb, ...
   let kernel : Kernel = {
@@ -57,18 +62,24 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
   )
 }
 
+///|
 fn Channel::new(name : String, socket_type : String) -> Channel {
   let peers : Map[Int, Peer] = Map([])
-  { name, socket_type, peers }
+  { name, socket_type, peers, }
 }
 
+///|
 fn bind_channel(k : Kernel, ch : Channel, ip : String, port : Int) -> Unit {
   // Every incoming TCP connection becomes a Peer on this channel.
   @nodeff.tcp_server(
     ip,
     port,
     fn(id) {
-      let peer : Peer = { id, session: @zmtp.ZmtpSession::new(), identities: [] }
+      let peer : Peer = {
+        id,
+        session: @zmtp.ZmtpSession::new(),
+        identities: [],
+      }
       ch.peers[id] = peer
       if ch.name == "iopub" {
         k.iopub = Some(peer)
@@ -89,10 +100,12 @@ fn bind_channel(k : Kernel, ch : Channel, ip : String, port : Int) -> Unit {
   )
 }
 
+///|
 fn send_raw(peer : Peer, data : Bytes) -> Unit {
   @nodeff.tcp_send(peer.id, data)
 }
 
+///|
 fn on_peer_data(k : Kernel, ch : Channel, peer : Peer, data : Bytes) -> Unit {
   let events = peer.session.feed(data)
   for ev in events {
@@ -100,13 +113,20 @@ fn on_peer_data(k : Kernel, ch : Channel, peer : Peer, data : Bytes) -> Unit {
       @zmtp.PeerGreeting => send_raw(peer, @zmtp.ready_command(ch.socket_type))
       @zmtp.PeerReady(_) => ()
       @zmtp.PingReceived(context) => send_raw(peer, @zmtp.pong_command(context))
-      @zmtp.Error(reason) => @nodeff.eprint("[moonjupyter] \{ch.name}: \{reason}")
+      @zmtp.Error(reason) =>
+        @nodeff.eprint("[moonjupyter] \{ch.name}: \{reason}")
       @zmtp.Message(frames) => handle_message(k, ch, peer, frames)
     }
   }
 }
 
-fn handle_message(k : Kernel, ch : Channel, peer : Peer, frames : Array[Bytes]) -> Unit {
+///|
+fn handle_message(
+  k : Kernel,
+  ch : Channel,
+  peer : Peer,
+  frames : Array[Bytes],
+) -> Unit {
   if ch.name == "iopub" {
     // SUB subscription frames; nothing to do.
     return
@@ -143,9 +163,11 @@ fn handle_message(k : Kernel, ch : Channel, peer : Peer, frames : Array[Bytes]) 
   }
 }
 
+///|
 fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
   match msg.msg_type {
-    "kernel_info_request" => reply(k, peer, "kernel_info_reply", kernel_info(), msg)
+    "kernel_info_request" =>
+      reply(k, peer, "kernel_info_reply", kernel_info(), msg)
     "execute_request" => handle_execute(k, peer, msg)
     "is_complete_request" =>
       reply(
@@ -165,11 +187,15 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
           ("matches", Json::array([])),
           (
             "cursor_start",
-            Json::number(@jupyter.jint_field(msg.content, "cursor_pos").to_double()),
+            Json::number(
+              @jupyter.jint_field(msg.content, "cursor_pos").to_double(),
+            ),
           ),
           (
             "cursor_end",
-            Json::number(@jupyter.jint_field(msg.content, "cursor_pos").to_double()),
+            Json::number(
+              @jupyter.jint_field(msg.content, "cursor_pos").to_double(),
+            ),
           ),
           ("metadata", @jupyter.obj([])),
         ]),
@@ -193,7 +219,10 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
         k,
         peer,
         "history_reply",
-        @jupyter.obj([("status", Json::string("ok")), ("history", Json::array([]))]),
+        @jupyter.obj([
+          ("status", Json::string("ok")),
+          ("history", Json::array([])),
+        ]),
         msg,
       )
     "shutdown_request" => {
@@ -207,16 +236,19 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
         ]),
         msg,
       )
-      publish(k, "status", @jupyter.obj([("execution_state", Json::string("idle"))]))
-      @nodeff.later(300, fn() {
-        @nodeff.exit(0)
-      })
+      publish(
+        k,
+        "status",
+        @jupyter.obj([("execution_state", Json::string("idle"))]),
+      )
+      @nodeff.later(300, fn() { @nodeff.exit(0) })
     }
     "comm_open" | "comm_msg" | "comm_close" | "interrupt_request" => ()
     other => @nodeff.eprint("[moonjupyter] unhandled msg_type: \{other}")
   }
 }
 
+///|
 fn kernel_info() -> Json {
   @jupyter.obj([
     ("status", Json::string("ok")),
@@ -242,12 +274,17 @@ fn kernel_info() -> Json {
   ])
 }
 
+///|
 fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
   let count = k.exec_count + 1
   k.exec_count = count
   k.parent = Some(msg.header)
   let code = @jupyter.jstr_field(msg.content, "code")
-  publish(k, "status", @jupyter.obj([("execution_state", Json::string("busy"))]))
+  publish(
+    k,
+    "status",
+    @jupyter.obj([("execution_state", Json::string("busy"))]),
+  )
   publish(
     k,
     "execute_input",
@@ -286,14 +323,26 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
         msg,
       )
     }
-    publish(k, "status", @jupyter.obj([("execution_state", Json::string("idle"))]))
+    publish(
+      k,
+      "status",
+      @jupyter.obj([("execution_state", Json::string("idle"))]),
+    )
   })
 }
 
+///|
 /// Execute a cell in a temporary MoonBit project via `moon run`.
-fn run_cell(k : Kernel, code : String, on_done : (Bool, String, String, String) -> Unit) -> Unit {
+fn run_cell(
+  k : Kernel,
+  code : String,
+  on_done : (Bool, String, String, String) -> Unit,
+) -> Unit {
   let dir = @nodeff.mkdtemp()
-  @nodeff.write_text(dir + "/moon.mod.json", "{\"name\": \"cell/exec\", \"version\": \"0.1.0\"}")
+  @nodeff.write_text(
+    dir + "/moon.mod.json",
+    "{\"name\": \"cell/exec\", \"version\": \"0.1.0\"}",
+  )
   @nodeff.write_text(dir + "/src/main/moon.pkg.json", "{\"is-main\": true}")
   let src = if contains_main_fn(code) {
     code
@@ -306,35 +355,40 @@ fn run_cell(k : Kernel, code : String, on_done : (Bool, String, String, String) 
   @nodeff.spawn_process(
     dir,
     "moon run src/main",
-    fn(chunk) {
-      out_buf = stream_lines(k, out_buf + chunk, "stdout")
-    },
-    fn(chunk) {
-      err_buf = stream_lines(k, err_buf + chunk, "stderr")
-    },
+    fn(chunk) { out_buf = stream_lines(k, out_buf + chunk, "stdout") },
+    fn(chunk) { err_buf = stream_lines(k, err_buf + chunk, "stderr") },
     fn(exit_code) {
       flush_pending(k, out_buf, "stdout")
       flush_pending(k, err_buf, "stderr")
       if exit_code == 0 {
         on_done(true, "", "", "")
       } else {
-        on_done(false, "MoonBitError", "cell exited with code \{exit_code}", last_lines(err_buf, 8))
+        on_done(
+          false,
+          "MoonBitError",
+          "cell exited with code \{exit_code}",
+          last_lines(err_buf, 8),
+        )
       }
       @nodeff.rmrf(dir)
     },
   )
 }
 
+///|
 /// MVP heuristic: cells that declare their own `fn main` run unmodified;
 /// everything else is wrapped in a generated entry point.
 fn contains_main_fn(code : String) -> Bool {
   code.contains("fn main")
 }
 
+///|
 /// Forward complete lines of an output stream to iopub as `stream` messages.
 /// Returns the trailing partial line (kept until more output arrives).
 fn stream_lines(k : Kernel, buf : String, name : String) -> String {
-  let lines = buf.split("\n") |> Iter::to_array |> Array::map(fn(v) { v.to_owned() })
+  let lines = buf.split("\n")
+    |> Iter::to_array
+    |> Array::map(fn(v) { v.to_owned() })
   let n = lines.length()
   for i = 0; i < n - 1; i = i + 1 {
     if lines[i] != "" {
@@ -351,6 +405,7 @@ fn stream_lines(k : Kernel, buf : String, name : String) -> String {
   lines[n - 1]
 }
 
+///|
 fn flush_pending(k : Kernel, buf : String, name : String) -> Unit {
   if buf != "" {
     publish(
@@ -364,13 +419,12 @@ fn flush_pending(k : Kernel, buf : String, name : String) -> Unit {
   }
 }
 
+///|
 fn last_lines(buf : String, count : Int) -> String {
-  let lines = buf.split("\n") |> Iter::to_array |> Array::map(fn(v) { v.to_owned() })
-  let start = if lines.length() > count {
-    lines.length() - count
-  } else {
-    0
-  }
+  let lines = buf.split("\n")
+    |> Iter::to_array
+    |> Array::map(fn(v) { v.to_owned() })
+  let start = if lines.length() > count { lines.length() - count } else { 0 }
   let sel : Array[String] = []
   for i = start; i < lines.length(); i = i + 1 {
     sel.push(lines[i])
@@ -378,9 +432,16 @@ fn last_lines(buf : String, count : Int) -> String {
   sel.join("\n")
 }
 
+///|
 /// Send a reply on the same channel, routed back through the identities the
 /// request arrived with.
-fn reply(k : Kernel, peer : Peer, msg_type : String, content : Json, msg : @jupyter.JMsg) -> Unit {
+fn reply(
+  k : Kernel,
+  peer : Peer,
+  msg_type : String,
+  content : Json,
+  msg : @jupyter.JMsg,
+) -> Unit {
   let header = @jupyter.new_header(
     k.session_id,
     k.username,
@@ -388,7 +449,13 @@ fn reply(k : Kernel, peer : Peer, msg_type : String, content : Json, msg : @jupy
     msg_type,
     @jupyter.uuid_v4_from(@nodeff.random_bytes(16)),
   )
-  let frames = @jupyter.build_frames(k.key, header, msg.header, @jupyter.obj([]), content)
+  let frames = @jupyter.build_frames(
+    k.key,
+    header,
+    msg.header,
+    @jupyter.obj([]),
+    content,
+  )
   let all : Array[Bytes] = []
   for f in peer.identities {
     all.push(f)
@@ -399,6 +466,7 @@ fn reply(k : Kernel, peer : Peer, msg_type : String, content : Json, msg : @jupy
   send_raw(peer, @zmtp.encode_message(all))
 }
 
+///|
 /// Broadcast a message on the iopub channel (PUB, no routing identities).
 fn publish(k : Kernel, msg_type : String, content : Json) -> Unit {
   match k.iopub {
@@ -415,7 +483,13 @@ fn publish(k : Kernel, msg_type : String, content : Json) -> Unit {
         Some(h) => h
         None => @jupyter.obj([])
       }
-      let frames = @jupyter.build_frames(k.key, header, parent, @jupyter.obj([]), content)
+      let frames = @jupyter.build_frames(
+        k.key,
+        header,
+        parent,
+        @jupyter.obj([]),
+        content,
+      )
       send_raw(peer, @zmtp.encode_message(frames))
     }
   }
