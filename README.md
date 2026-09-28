@@ -115,6 +115,10 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 ## Changelog
 
+- **v0.1.5** — fix Date.now() Int32 overflow in nodeff FFI, recurring
+  periodic stats/maintenance timers (`every()`), real per-cell execution
+  timing and failure counting in metrics, kernel_info reports the actual
+  release version
 - **v0.1.4** — kernel observability (structured logging, per-peer counters,
   execution metrics, periodic stats), 16 MiB message-part size limit (DoS
   guard), `nodeff.now_seconds()`, restore jupyter inline tests

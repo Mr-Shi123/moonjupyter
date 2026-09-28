@@ -356,12 +356,18 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 }
 
 ///|
+///|
+/// Version reported to Jupyter clients via kernel_info; keep in sync with
+/// the version in moon.mod.
+const KERNEL_VERSION : String = "0.1.5"
+
+///|
 fn kernel_info() -> Json {
   @jupyter.obj([
     ("status", Json::string("ok")),
     ("protocol_version", Json::string("5.4")),
     ("implementation", Json::string("moonjupyter")),
-    ("implementation_version", Json::string("0.1.0")),
+    ("implementation_version", Json::string(KERNEL_VERSION)),
     (
       "language_info",
       @jupyter.obj([
@@ -374,7 +380,7 @@ fn kernel_info() -> Json {
     (
       "banner",
       Json::string(
-        "MoonBit kernel (moonjupyter) 0.1.0 — each cell runs via `moon run` in a scratch project",
+        "MoonBit kernel (moonjupyter) \{KERNEL_VERSION} — each cell runs via `moon run` in a scratch project",
       ),
     ),
     ("help_links", Json::array([])),
