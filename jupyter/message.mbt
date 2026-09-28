@@ -354,3 +354,23 @@ test "parse connection file" {
     Err(_) => assert_true(false)
   }
 }
+
+///|
+test "oversized message part rejected" {
+  let header = new_header(
+    "sess", "user", "2026-01-01T00:00:00Z", "execute_request", "id-3",
+  )
+  let frames = build_frames("k1", header, obj([]), obj([]), obj([]))
+  let oversized = Bytes::make(MAX_PART_SIZE + 1, @bx.u8(65))
+  // Replace the content frame (last of the envelope) with an oversized one.
+  frames[frames.length() - 1] = oversized
+  let full : Array[Bytes] = [b"i"]
+  for f in frames {
+    full.push(f)
+  }
+  let noop = fn(b : Bytes) -> Bytes { b }
+  match parse_message(full, "k1", noop) {
+    Ok(_) => assert_true(false)
+    Err(_reason) => ()
+  }
+}
