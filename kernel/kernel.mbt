@@ -75,6 +75,12 @@ priv struct Kernel {
   mut cell_deps : Array[(String, String)] // (module, version)
   /// package paths imported into every cell project
   cell_imports : Array[String]
+  /// per-cell wall-time limit, adjustable via the %timeout magic
+  mut cell_timeout_ms : Int
+  /// elapsed_ms() of the last force-kill; the next cell waits a beat so
+  /// the OS can finish tearing the killed process tree down (a moon run
+  /// started instantly after taskkill fails with exit 1 and no output)
+  mut last_kill_ms : Int
 }
 
 ///|
@@ -111,6 +117,8 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
     language_version: "dev",
     cell_deps: [],
     cell_imports: [],
+    cell_timeout_ms: CELL_TIMEOUT_MS,
+    last_kill_ms: -1000000,
   }
   let shell = Channel::new("shell", "ROUTER")
   let control = Channel::new("control", "ROUTER")
@@ -447,6 +455,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
           "interrupt: killing running cell (pid \{k.cell_pid})",
         )
         k.cell_interrupted = true
+        k.last_kill_ms = @nodeff.elapsed_ms()
         @nodeff.kill_tree(k.cell_pid)
       }
     }
@@ -458,7 +467,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
-const KERNEL_VERSION : String = "0.1.7"
+const KERNEL_VERSION : String = "0.1.8"
 
 ///|
 /// Return the last `keep` elements of `xs`.
@@ -928,9 +937,17 @@ fn s_less(a : String, b : String) -> Bool {
 }
 
 ///|
-/// A cell that produces no output for this long is considered hung and is
-/// killed (covers infinite loops; compile time is well under this).
+/// Default wall-time limit for a cell that produces no output; per-kernel
+/// adjustable with the %timeout magic.
 const CELL_TIMEOUT_MS : Int = 60000
+
+///|
+/// Bounds for the %timeout setting: below 5s legitimate compiles may be
+/// killed; above 1h a hung cell holds the session for too long.
+const MIN_TIMEOUT_MS : Int = 5000
+
+///|
+const MAX_TIMEOUT_MS : Int = 3600000
 
 ///|
 /// Execute a cell in a temporary MoonBit project via `moon run`. `on_done`
@@ -940,6 +957,14 @@ fn run_cell(
   code : String,
   on_done : (Bool, String, String, String, Int) -> Unit,
 ) -> Unit {
+  // A moon run launched right after a force-kill fails instantly (exit 1,
+  // no output) because the killed tree is still being torn down; give the
+  // OS a moment before starting a new one.
+  let since_kill = @nodeff.elapsed_ms() - k.last_kill_ms
+  if since_kill >= 0 && since_kill < 1000 {
+    @nodeff.later(1000 - since_kill + 50, fn() { run_cell(k, code, on_done) })
+    return
+  }
   let dir = @nodeff.mkdtemp()
   // Modules declared with %use become moon.mod imports ("module@version");
   // their package paths are imported by the generated moon.pkg. Both use
@@ -999,11 +1024,19 @@ fn run_cell(
         on_done(true, "", "", "", duration_ms)
       } else {
         k.metrics.error_count = k.metrics.error_count + 1
+        let mut tb = last_lines(err_buf, 8)
+        match missing_package_hint(err_buf) {
+          Some(hint) => {
+            log_kernel(k, LogLevel::Info, hint)
+            tb = tb + "\n" + hint
+          }
+          None => ()
+        }
         on_done(
           false,
           "MoonBitError",
           "cell exited with code \{exit_code}",
-          last_lines(err_buf, 8),
+          tb,
           duration_ms,
         )
       }
@@ -1011,13 +1044,14 @@ fn run_cell(
     },
     fn(pid) { k.cell_pid = pid },
   )
-  @nodeff.later(CELL_TIMEOUT_MS, fn() {
+  @nodeff.later(k.cell_timeout_ms, fn() {
     if k.run_seq == my_seq && k.cell_pid > 0 {
       log_kernel(
         k,
         LogLevel::Warn,
-        "cell \{k.exec_count} exceeded \{CELL_TIMEOUT_MS / 1000}s, killing pid \{k.cell_pid}",
+        "cell \{k.exec_count} exceeded \{k.cell_timeout_ms / 1000}s, killing pid \{k.cell_pid}",
       )
+      k.last_kill_ms = @nodeff.elapsed_ms()
       @nodeff.kill_tree(k.cell_pid)
       k.cell_pid = -1
       let duration_ms = @nodeff.elapsed_ms() - started
@@ -1027,7 +1061,7 @@ fn run_cell(
       on_done(
         false,
         "CellTimeout",
-        "cell exceeded \{CELL_TIMEOUT_MS / 1000}s and was terminated",
+        "cell exceeded \{k.cell_timeout_ms / 1000}s and was terminated",
         "",
         duration_ms,
       )
@@ -1041,6 +1075,11 @@ fn run_cell(
 fn contains_main_fn(code : String) -> Bool {
   code.contains("fn main")
 }
+
+///|
+/// Upper bound for the pending (newline-less) output fragment, so a cell
+/// printing endlessly without newlines cannot grow memory unbounded.
+const MAX_PENDING_OUTPUT : Int = 1024 * 1024
 
 ///|
 /// Forward complete lines of an output stream to iopub as `stream` messages.
@@ -1062,7 +1101,21 @@ fn stream_lines(k : Kernel, buf : String, name : String) -> String {
       )
     }
   }
-  lines[n - 1]
+  let partial = lines[n - 1]
+  if partial.length() > MAX_PENDING_OUTPUT {
+    // Flush the oversized fragment as if it were a complete line; the
+    // output is forwarded intact, only line boundaries inside it are lost.
+    publish(
+      k,
+      "stream",
+      @jupyter.obj([
+        ("name", Json::string(name)),
+        ("text", Json::string(partial)),
+      ]),
+    )
+    return ""
+  }
+  partial
 }
 
 ///|
@@ -1087,6 +1140,42 @@ fn publish_stream(k : Kernel, name : String, text : String) -> Unit {
     "stream",
     @jupyter.obj([("name", Json::string(name)), ("text", Json::string(text))]),
   )
+}
+
+///|
+/// Parse a %timeout argument: whole milliseconds in [MIN, MAX].
+fn parse_timeout_ms(arg : String) -> Int? {
+  if arg == "" || arg.length() > 8 {
+    return None
+  }
+  let mut v = 0
+  for i = 0; i < arg.length(); i = i + 1 {
+    let c = arg[i]
+    if c < 48 || c > 57 {
+      return None
+    }
+    v = v * 10 + c.to_int() - 48
+  }
+  if v >= MIN_TIMEOUT_MS && v <= MAX_TIMEOUT_MS {
+    Some(v)
+  } else {
+    None
+  }
+}
+
+///|
+/// When a cell fails because a referenced package is unknown, point the
+/// user at the %use magic instead of leaving a bare registry error.
+fn missing_package_hint(err_text : String) -> String? {
+  if err_text.contains("module was not found in the registry") ||
+    err_text.contains("Failed to resolve registry dependency") ||
+    (err_text.contains("module-level import") && err_text.contains("not found")) {
+    Some(
+      "hint: declare external packages with %use <package-path>@<version> (e.g. %use bobzhang/loop_invariants_string@0.16.0)",
+    )
+  } else {
+    None
+  }
 }
 
 ///|
@@ -1176,7 +1265,8 @@ fn parse_magic(k : Kernel, code : String) -> String? {
         "  %history           — show the last executed cells\n" +
         "  %stats             — show kernel performance statistics\n" +
         "  %time <code>       — run code and report its wall time\n" +
-        "  %use [<module>]    — import an external package into cells\n" +
+        "  %use [<pkg>@<v> …] — import external package(s) into cells\n" +
+        "  %timeout [<ms>]    — show/set the per-cell wall-time limit\n" +
         "  %reset             — clear history, counters and metrics",
       )
     "history" => {
@@ -1211,66 +1301,97 @@ fn parse_magic(k : Kernel, code : String) -> String? {
       k.metrics.throughput = Map([])
       Some("kernel state cleared: history, execution counter and metrics")
     }
-    "use" => {
+    "timeout" => {
       let arg = magic_args(code)
       if arg == "" {
+        Some(
+          "cell timeout: \{k.cell_timeout_ms} ms (change with %timeout <ms>, \{MIN_TIMEOUT_MS}..\{MAX_TIMEOUT_MS})",
+        )
+      } else {
+        match parse_timeout_ms(arg) {
+          Some(ms) => {
+            k.cell_timeout_ms = ms
+            Some("cell timeout set to \{ms} ms")
+          }
+          None =>
+            Some(
+              "invalid timeout: \{arg} — use whole milliseconds between \{MIN_TIMEOUT_MS} and \{MAX_TIMEOUT_MS}",
+            )
+        }
+      }
+    }
+    "use" => {
+      let args_text = magic_args(code)
+      if args_text == "" {
         let mut out = "active extra packages:\n"
         for i = 0; i < k.cell_imports.length(); i = i + 1 {
           let (m, v) = k.cell_deps[i]
           out = out + "  \{k.cell_imports[i]} (\{m}@\{v})\n"
         }
         if k.cell_imports.length() == 0 {
-          out = out + "  (none — usage: %use <package-path>@<version>)\n"
+          out = out + "  (none — usage: %use <package-path>@<version> ...)\n"
         }
         return Some(out)
       }
-      // "<path>@<version>": moon.mod.json requires a concrete version.
-      let mut at = -1
-      for i = 0; i < arg.length(); i = i + 1 {
-        if arg[i] == 64 {
-          at = i // '@'
-          break
-        }
-      }
-      if at < 0 {
-        return Some(
-          "missing version — moon requires one: %use <package-path>@<version>\n  e.g. %use bobzhang/loop_invariants_string@0.16.0",
-        )
-      }
-      let path = @bx.sslice(arg, 0, at)
-      let version = @bx.sslice(arg, at + 1, arg.length())
-      if !valid_pkg_name(path) || !valid_pkg_name(version) {
-        return Some("invalid package name or version: \{arg}")
-      }
-      // dep module = first two path segments ("user/pkg" from "user/pkg/sub")
-      let segs = path.split("/")
+      // one or more "<path>@<version>" entries, whitespace separated
+      let mut out = ""
+      let raw = args_text.split(" ")
         |> Iter::to_array
         |> Array::map(fn(v) { v.to_owned() })
-      let dep_mod = if segs.length() >= 2 {
-        "\{segs[0]}/\{segs[1]}"
-      } else {
-        path
-      }
-      // replace an existing entry for the module, else append
-      let updated : Array[(String, String)] = []
-      for d in k.cell_deps {
-        let (m, _v) = d
-        if m != dep_mod {
-          updated.push(d)
+      for a in raw {
+        if a != "" {
+          out = out + add_cell_dep(k, a) + "\n"
         }
       }
-      updated.push((dep_mod, version))
-      k.cell_deps = updated
-      if !arr_contains(k.cell_imports, path) {
-        k.cell_imports.push(path)
-      }
-      Some(
-        "added module \{dep_mod}@\{version} (import \{path}) — takes effect on the next cell",
-      )
+      Some(out)
     }
     "time" => None // handled by handle_execute: runs the rest as code
     _ => Some("unknown magic command %\{name} — try %help")
   }
+}
+
+///|
+/// Register one "<package-path>@<version>" entry for %use; returns the
+/// user-facing result text.
+fn add_cell_dep(k : Kernel, arg : String) -> String {
+  let mut at = -1
+  for i = 0; i < arg.length(); i = i + 1 {
+    if arg[i] == 64 {
+      at = i // '@'
+      break
+    }
+  }
+  if at < 0 {
+    return "missing version — moon requires one: %use <package-path>@<version>\n  e.g. %use bobzhang/loop_invariants_string@0.16.0"
+  }
+  let path = @bx.sslice(arg, 0, at)
+  let version = @bx.sslice(arg, at + 1, arg.length())
+  if !valid_pkg_name(path) || !valid_pkg_name(version) {
+    return "invalid package name or version: \{arg}"
+  }
+  // dep module = first two path segments ("user/pkg" from "user/pkg/sub")
+  let segs = path.split("/")
+    |> Iter::to_array
+    |> Array::map(fn(v) { v.to_owned() })
+  let dep_mod = if segs.length() >= 2 {
+    "\{segs[0]}/\{segs[1]}"
+  } else {
+    path
+  }
+  // replace an existing entry for the module, else append
+  let updated : Array[(String, String)] = []
+  for d in k.cell_deps {
+    let (m, _v) = d
+    if m != dep_mod {
+      updated.push(d)
+    }
+  }
+  updated.push((dep_mod, version))
+  k.cell_deps = updated
+  if !arr_contains(k.cell_imports, path) {
+    k.cell_imports.push(path)
+  }
+  "added module \{dep_mod}@\{version} (import \{path}) — takes effect on the next cell"
 }
 
 ///|
@@ -1655,4 +1776,27 @@ test "magic_name extracts the command" {
     Some(_) => assert_true(false)
     None => assert_true(true)
   }
+}
+
+///|
+test "timeout parsing bounds" {
+  match parse_timeout_ms("6000") {
+    Some(ms) => assert_eq(ms, 6000)
+    None => assert_true(false)
+  }
+  // below the 5s floor
+  assert_true(parse_timeout_ms("4000") is None)
+  // above the 1h ceiling
+  assert_true(parse_timeout_ms("3600001") is None)
+  // non-numeric and empty
+  assert_true(parse_timeout_ms("6s") is None)
+  assert_true(parse_timeout_ms("") is None)
+}
+
+///|
+test "missing package hint matches moon errors" {
+  let registry_err = "Failed to resolve registry dependency `a/b` for module `cell/exec`: module was not found in the registry"
+  assert_true(missing_package_hint(registry_err) is Some(_))
+  // ordinary compile errors get no hint
+  assert_true(missing_package_hint("Error: type mismatch at line 3") is None)
 }

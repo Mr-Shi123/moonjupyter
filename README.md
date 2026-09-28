@@ -124,6 +124,12 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 ## Changelog
 
+- **v0.1.8** — magic commands `%timeout` (view/set the per-cell wall-time
+  limit) and multi-package `%use a@v b@v`; cell output fragment is capped
+  at 1 MiB so newline-less floods cannot grow memory unbounded; registry
+  failures in cells now carry a `%use` hint; cells launched right after a
+  force-kill wait ~1s so the OS can tear the killed tree down (an instant
+  moon run used to fail with exit 1 and no output)
 - **v0.1.7** — magic commands `%time` / `%use <pkg>@<ver>` / `%reset`;
   `%use` lets cells import mooncakes packages (generates current moon.mod /
   moon.pkg configs, replacing the deprecated JSON files); is_complete now
