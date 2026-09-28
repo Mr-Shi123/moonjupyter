@@ -88,14 +88,28 @@ extern "js" fn js_spawn(
   on_out : (String) -> Unit,
   on_err : (String) -> Unit,
   on_exit : (Int) -> Unit,
+  on_pid : (Int) -> Unit,
 ) -> Unit =
-  #|(cwd, command, on_out, on_err, on_exit) => {
+  #|(cwd, command, on_out, on_err, on_exit, on_pid) => {
   #|  const cp = require("child_process");
-  #|  const p = cp.spawn(command, { cwd: cwd, shell: true });
+  #|  const p = cp.spawn(command, { cwd: cwd, shell: true, detached: process.platform !== "win32" });
+  #|  on_pid(p.pid === undefined ? -1 : p.pid);
   #|  p.stdout.on("data", (d) => on_out(d.toString()));
   #|  p.stderr.on("data", (d) => on_err(d.toString()));
   #|  p.on("error", (e) => { on_err(String(e)); on_exit(-1); });
   #|  p.on("exit", (code) => on_exit(code === null ? -1 : code));
+  #|}
+
+///|
+extern "js" fn js_kill_tree(pid : Int) -> Unit =
+  #|(pid) => {
+  #|  try {
+  #|    if (process.platform === "win32") {
+  #|      require("child_process").spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
+  #|    } else {
+  #|      try { process.kill(-pid, "SIGKILL"); } catch (e) { try { process.kill(pid, "SIGKILL"); } catch (e2) {} }
+  #|    }
+  #|  } catch (e) {}
   #|}
 
 ///|
@@ -224,16 +238,24 @@ pub fn rmrf(path : String) -> Unit {
 }
 
 ///|
-/// Run a shell command in `cwd`, streaming stdout/stderr chunks and the
-/// exit code through callbacks.
+/// Run a shell command in `cwd`, streaming stdout/stderr chunks, the exit
+/// code and the child pid through callbacks.
 pub fn spawn_process(
   cwd : String,
   command : String,
   on_out : (String) -> Unit,
   on_err : (String) -> Unit,
   on_exit : (Int) -> Unit,
+  on_pid : (Int) -> Unit,
 ) -> Unit {
-  js_spawn(cwd, command, on_out, on_err, on_exit)
+  js_spawn(cwd, command, on_out, on_err, on_exit, on_pid)
+}
+
+///|
+/// Force-kill a process and (on Windows) its whole tree; on Unix the child
+/// is spawned detached, so killing the negative pid takes down the group.
+pub fn kill_tree(pid : Int) -> Unit {
+  js_kill_tree(pid)
 }
 
 ///|

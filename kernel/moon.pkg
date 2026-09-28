@@ -1,4 +1,5 @@
 import {
+  "moonjupyter/moonjupyter/bytesx" @bx,
   "moonjupyter/moonjupyter/jupyter",
   "moonjupyter/moonjupyter/nodeff",
   "moonjupyter/moonjupyter/zmtp",

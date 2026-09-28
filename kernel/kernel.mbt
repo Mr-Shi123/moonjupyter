@@ -59,6 +59,16 @@ priv struct Kernel {
   peer_stats : Map[Int, Int] // peer_id -> message_count
   metrics : PerformanceMetrics
   mut last_stats_report : Int
+  /// last 100 executed cells: (execution_count, source code)
+  mut history : Array[(Int, String)]
+  /// pid of the running cell's `moon run` process, -1 when idle
+  mut cell_pid : Int
+  /// set when the user interrupted the running cell; the exit handler
+  /// reports KeyboardInterrupt instead of a generic error
+  mut cell_interrupted : Bool
+  /// bumped on every run_cell; stale timers from earlier cells compare
+  /// against it and stand down
+  mut run_seq : Int
 }
 
 ///|
@@ -88,6 +98,10 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
       throughput: Map([]),
     },
     last_stats_report: 0,
+    history: [],
+    cell_pid: -1,
+    cell_interrupted: false,
+    run_seq: 0,
   }
   let shell = Channel::new("shell", "ROUTER")
   let control = Channel::new("control", "ROUTER")
@@ -130,6 +144,9 @@ fn bind_channel(k : Kernel, ch : Channel, ip : String, port : Int) -> Unit {
       if ch.name == "iopub" {
         k.iopub = Some(peer)
       }
+      // ZMTP 3.1: the listening side sends its greeting immediately on
+      // connect, before any command or message traffic.
+      @nodeff.tcp_send(id, @zmtp.greeting_bytes(true))
       log_kernel(k, LogLevel::Info, "peer \{id} connected to \{ch.name} channel")
     },
     fn(id, data) {
@@ -284,30 +301,28 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
         @jupyter.obj([("status", Json::string("complete"))]),
         msg,
       )
-    "complete_request" =>
+    "complete_request" => {
+      let code = @jupyter.jstr_field(msg.content, "code")
+      let cursor = @jupyter.jint_field(msg.content, "cursor_pos")
+      let (cursor_start, cursor_end, matches) = complete_token(code, cursor)
+      let jmatches : Array[Json] = []
+      for m in matches {
+        jmatches.push(Json::string(m))
+      }
       reply(
         k,
         peer,
         "complete_reply",
         @jupyter.obj([
           ("status", Json::string("ok")),
-          ("matches", Json::array([])),
-          (
-            "cursor_start",
-            Json::number(
-              @jupyter.jint_field(msg.content, "cursor_pos").to_double(),
-            ),
-          ),
-          (
-            "cursor_end",
-            Json::number(
-              @jupyter.jint_field(msg.content, "cursor_pos").to_double(),
-            ),
-          ),
+          ("matches", Json::array(jmatches)),
+          ("cursor_start", Json::number(cursor_start.to_double())),
+          ("cursor_end", Json::number(cursor_end.to_double())),
           ("metadata", @jupyter.obj([])),
         ]),
         msg,
       )
+    }
     "inspect_request" =>
       reply(
         k,
@@ -328,7 +343,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
         "history_reply",
         @jupyter.obj([
           ("status", Json::string("ok")),
-          ("history", Json::array([])),
+          ("history", history_json(k.history)),
         ]),
         msg,
       )
@@ -350,7 +365,25 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
       )
       @nodeff.later(300, fn() { @nodeff.exit(0) })
     }
-    "comm_open" | "comm_msg" | "comm_close" | "interrupt_request" => ()
+    "interrupt_request" => {
+      reply(
+        k,
+        peer,
+        "interrupt_reply",
+        @jupyter.obj([("status", Json::string("ok"))]),
+        msg,
+      )
+      if k.cell_pid > 0 {
+        log_kernel(
+          k,
+          LogLevel::Warn,
+          "interrupt: killing running cell (pid \{k.cell_pid})",
+        )
+        k.cell_interrupted = true
+        @nodeff.kill_tree(k.cell_pid)
+      }
+    }
+    "comm_open" | "comm_msg" | "comm_close" => ()
     other => @nodeff.eprint("[moonjupyter] unhandled msg_type: \{other}")
   }
 }
@@ -360,6 +393,33 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
 const KERNEL_VERSION : String = "0.1.5"
+
+///|
+/// Return the last `keep` elements of `xs`.
+fn drop_first(xs : Array[(Int, String)], drop : Int) -> Array[(Int, String)] {
+  let out : Array[(Int, String)] = []
+  for i = drop; i < xs.length(); i = i + 1 {
+    out.push(xs[i])
+  }
+  out
+}
+
+///|
+/// Build the history_reply payload: [session=0, execution_count, input].
+fn history_json(entries : Array[(Int, String)]) -> Json {
+  let items : Array[Json] = []
+  for entry in entries {
+    let (n, code) = entry
+    items.push(
+      Json::array([
+        Json::number(0.0),
+        Json::number(n.to_double()),
+        Json::string(code),
+      ]),
+    )
+  }
+  Json::array(items)
+}
 
 ///|
 fn kernel_info() -> Json {
@@ -392,9 +452,15 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
   let count = k.exec_count + 1
   k.exec_count = count
   k.parent = Some(msg.header)
-  
+
   let code = @jupyter.jstr_field(msg.content, "code")
   log_kernel(k, LogLevel::Info, "executing cell \{count}: \{code}")
+
+  // Keep the last 100 cells for history_request.
+  k.history.push((count, code))
+  if k.history.length() > 100 {
+    k.history = drop_first(k.history, k.history.length() - 100)
+  }
   
   publish(
     k,
@@ -451,6 +517,107 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 }
 
 ///|
+/// MoonBit keywords and common builtins offered by TAB completion.
+let completion_candidates : Array[String] = [
+  "fn", "let", "mut", "if", "else", "match", "while", "for", "in", "break",
+  "continue", "return", "struct", "enum", "trait", "impl", "pub", "priv",
+  "true", "false", "print", "println", "to_string", "to_int", "to_double",
+  "length", "abs", "min", "max", "sqrt",
+]
+
+///|
+/// ASCII identifier character, as a UTF-16 code unit ('a'..'z', 'A'..'Z',
+/// '0'..'9', '_').
+fn is_ident_char(c : UInt16) -> Bool {
+  (c >= 97 && c <= 122) ||
+  (c >= 65 && c <= 90) ||
+  (c >= 48 && c <= 57) ||
+  c == 95
+}
+
+///|
+fn is_digit_char(c : UInt16) -> Bool {
+  c >= 48 && c <= 57
+}
+
+///|
+/// TAB completion: extract the identifier ending at `cursor_pos` and suggest
+/// keywords plus identifiers that appear anywhere in the cell. Returns
+/// (cursor_start, cursor_end, matches).
+fn complete_token(
+  code : String,
+  cursor_pos : Int,
+) -> (Int, Int, Array[String]) {
+  let end = if cursor_pos > code.length() { code.length() } else { cursor_pos }
+  let mut start = end
+  while start > 0 && is_ident_char(code[start - 1]) {
+    start = start - 1
+  }
+  let token = @bx.sslice(code, start, end)
+  if token == "" {
+    return (end, end, [])
+  }
+  // Words appearing in the cell: identifiers that may have been defined
+  // on earlier lines. Skip numeric literals.
+  let candidates : Map[String, Bool] = Map([])
+  for kw in completion_candidates {
+    candidates[kw] = true
+  }
+  let mut word = ""
+  for i = 0; i < code.length(); i = i + 1 {
+    let c = code[i]
+    if is_ident_char(c) {
+      word = word + @bx.char_str(c.to_int())
+    } else {
+      if word != "" && !is_digit_char(word[0]) {
+        candidates[word] = true
+      }
+      word = ""
+    }
+  }
+  if word != "" && !is_digit_char(word[0]) {
+    candidates[word] = true
+  }
+  let matches : Array[String] = []
+  for name, _ in candidates {
+    if name.length() >= token.length() &&
+      @bx.sslice(name, 0, token.length()) == token {
+      matches.push(name)
+    }
+  }
+  // Insertion sort by ASCII lexicographic order (small n); String's
+  // built-in compare orders by length first, which is not what a
+  // completion list should show.
+  for i = 1; i < matches.length(); i = i + 1 {
+    let cur = matches[i]
+    let mut j = i - 1
+    while j >= 0 && s_less(cur, matches[j]) {
+      matches[j + 1] = matches[j]
+      j = j - 1
+    }
+    matches[j + 1] = cur
+  }
+  (start, end, matches)
+}
+
+///|
+/// ASCII lexicographic "a before b" ordering.
+fn s_less(a : String, b : String) -> Bool {
+  let n = if a.length() < b.length() { a.length() } else { b.length() }
+  for i = 0; i < n; i = i + 1 {
+    if a[i] != b[i] {
+      return a[i] < b[i]
+    }
+  }
+  a.length() < b.length()
+}
+
+///|
+/// A cell that produces no output for this long is considered hung and is
+/// killed (covers infinite loops; compile time is well under this).
+const CELL_TIMEOUT_MS : Int = 60000
+
+///|
 /// Execute a cell in a temporary MoonBit project via `moon run`.
 fn run_cell(
   k : Kernel,
@@ -470,6 +637,10 @@ fn run_cell(
   }
   @nodeff.write_text(dir + "/src/main/main.mbt", src)
   let started = @nodeff.elapsed_ms()
+  k.run_seq = k.run_seq + 1
+  let my_seq = k.run_seq
+  k.cell_pid = -1
+  k.cell_interrupted = false
   let mut out_buf = ""
   let mut err_buf = ""
   @nodeff.spawn_process(
@@ -478,10 +649,18 @@ fn run_cell(
     fn(chunk) { out_buf = stream_lines(k, out_buf + chunk, "stdout") },
     fn(chunk) { err_buf = stream_lines(k, err_buf + chunk, "stderr") },
     fn(exit_code) {
+      if k.cell_pid < 0 {
+        return // aborted; timeout/interrupt path already reported
+      }
+      k.cell_pid = -1
+      k.metrics.execution_time["exec-\{k.exec_count}"] = @nodeff.elapsed_ms() - started
       flush_pending(k, out_buf, "stdout")
       flush_pending(k, err_buf, "stderr")
-      k.metrics.execution_time["exec-\{k.exec_count}"] = @nodeff.elapsed_ms() - started
-      if exit_code == 0 {
+      if k.cell_interrupted {
+        k.metrics.error_count = k.metrics.error_count + 1
+        log_kernel(k, LogLevel::Warn, "cell \{k.exec_count} interrupted")
+        on_done(false, "KeyboardInterrupt", "execution interrupted", "")
+      } else if exit_code == 0 {
         on_done(true, "", "", "")
       } else {
         k.metrics.error_count = k.metrics.error_count + 1
@@ -494,7 +673,28 @@ fn run_cell(
       }
       @nodeff.rmrf(dir)
     },
+    fn(pid) { k.cell_pid = pid },
   )
+  @nodeff.later(CELL_TIMEOUT_MS, fn() {
+    if k.run_seq == my_seq && k.cell_pid > 0 {
+      log_kernel(
+        k,
+        LogLevel::Warn,
+        "cell \{k.exec_count} exceeded \{CELL_TIMEOUT_MS / 1000}s, killing pid \{k.cell_pid}",
+      )
+      @nodeff.kill_tree(k.cell_pid)
+      k.cell_pid = -1
+      k.metrics.execution_time["exec-\{k.exec_count}"] = @nodeff.elapsed_ms() - started
+      k.metrics.error_count = k.metrics.error_count + 1
+      @nodeff.rmrf(dir)
+      on_done(
+        false,
+        "CellTimeout",
+        "cell exceeded \{CELL_TIMEOUT_MS / 1000}s and was terminated",
+        "",
+      )
+    }
+  })
 }
 
 ///|
@@ -737,5 +937,54 @@ fn publish(k : Kernel, msg_type : String, content : Json) -> Unit {
       )
       send_raw(peer, @zmtp.encode_message(frames))
     }
+  }
+}
+///|
+/// ---- tests ----
+test "completion suggests keywords and cell identifiers" {
+  let code = "let num = 1\nnum"
+  // "num" spans indices 12..15, cursor at end of token
+  let (start, end, matches) = complete_token(code, 15)
+  assert_eq(start, 12)
+  assert_eq(end, 15)
+  assert_eq(matches.length(), 1)
+  assert_eq(matches[0], "num")
+}
+
+///|
+test "completion lists several candidates sorted" {
+  let (start, _end, matches) = complete_token("println(1)", 3)
+  assert_eq(start, 0)
+  // token "pri" matches the print/println/priv keywords
+  assert_eq(matches, ["print", "println", "priv"])
+}
+
+///|
+test "completion at empty token yields nothing" {
+  let (start, end, matches) = complete_token("let x = 1", 4)
+  // position 4 is right after "let " (space) -> empty token
+  assert_eq(start, 4)
+  assert_eq(end, 4)
+  assert_eq(matches.length(), 0)
+}
+
+///|
+test "history payload shape" {
+  let h : Array[(Int, String)] = [(1, "let a = 1"), (2, "println(a)")]
+  match history_json(h) {
+    Json::Array(items) => {
+      assert_eq(items.length(), 2)
+      match items[1] {
+        Json::Array(parts) => {
+          assert_eq(parts.length(), 3)
+          match parts[1] {
+            Json::Number(d, ..) => assert_eq(d, 2.0)
+            _ => assert_true(false)
+          }
+        }
+        _ => assert_true(false)
+      }
+    }
+    _ => assert_true(false)
   }
 }

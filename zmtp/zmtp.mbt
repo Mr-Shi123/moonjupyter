@@ -151,8 +151,11 @@ fn frame_bytes(body : Bytes, more : Bool, command : Bool) -> Bytes {
   if len > 255 {
     flags = flags | FLAG_LONG
     out.push(@bx.u8(flags))
+    // 64-bit big-endian size. len is a 32-bit Int, so the top four bytes
+    // are zero — do NOT shift by >= 32 (MoonBit shifts by shift mod 32).
     for shift = 56; shift >= 0; shift = shift - 8 {
-      out.push(@bx.u8((len >> shift) & 0xFF))
+      let b = if shift >= 32 { 0 } else { (len >> shift) & 0xFF }
+      out.push(@bx.u8(b))
     }
   } else {
     out.push(@bx.u8(flags))
@@ -410,6 +413,30 @@ test "message roundtrip" {
       assert_eq(frames.length(), 3)
       assert_true(@bx.bytes_equal(frames[1], b"two"))
     }
+    _ => assert_true(false)
+  }
+}
+
+///|
+test "LONG frame size is a real 64-bit big-endian encoding" {
+  // Regression: shifting a 32-bit Int by >= 32 wraps (shift mod 32) and the
+  // 4-byte length was written twice, corrupting every frame over 255 bytes.
+  let body = Bytes::make(300, @bx.u8(65)) // 300 > 255 -> LONG encoding
+  let wire = frame_bytes(body, false, false)
+  assert_eq(wire[0].to_int(), FLAG_LONG)
+  let mut size = 0
+  for i = 0; i < 8; i = i + 1 {
+    size = size * 256 + wire[1 + i].to_int()
+  }
+  assert_eq(size, 300)
+  // and the body follows intact
+  assert_eq(wire[9].to_int(), 65)
+  // roundtrip through the decoder
+  let s = ZmtpSession::new()
+  let _ = s.feed(greeting_bytes(true))
+  let _ = s.feed(ready_command("DEALER"))
+  match s.feed(wire)[0] {
+    Message(frames) => assert_eq(frames[0].length(), 300)
     _ => assert_true(false)
   }
 }
