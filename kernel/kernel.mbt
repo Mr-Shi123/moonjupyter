@@ -163,6 +163,8 @@ fn bind_channel(k : Kernel, ch : Channel, ip : String, port : Int) -> Unit {
     },
     fn(id) {
       let _ = ch.peers.remove(id)
+      // per-connection counters would otherwise accumulate forever
+      let _ = k.peer_stats.remove(id)
       if ch.name == "iopub" {
         k.iopub = None
       }
@@ -402,7 +404,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
-const KERNEL_VERSION : String = "0.1.5"
+const KERNEL_VERSION : String = "0.1.6"
 
 ///|
 /// Return the last `keep` elements of `xs`.
@@ -432,15 +434,16 @@ fn history_json(entries : Array[(Int, String)]) -> Json {
 }
 
 ///|
-/// Read a boolean field out of a JSON object, defaulting to false.
-fn jbool_field(j : Json, key : String) -> Bool {
+/// Read a boolean field out of a JSON object, defaulting to `default`.
+fn jbool_field(j : Json, key : String, default~ : Bool = false) -> Bool {
   match j {
     Json::Object(fields) =>
       match fields.get(key) {
         Some(Json::True) => true
-        _ => false
+        Some(Json::False) => false
+        _ => default
       }
-    _ => false
+    _ => default
   }
 }
 
@@ -549,17 +552,24 @@ fn detect_language_version(k : Kernel) -> Unit {
 
 ///|
 fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
-  let count = k.exec_count + 1
-  k.exec_count = count
+  // Spec §execute: store_history=false does not bump the execution count
+  // and leaves no history entry (silent fire-and-forget execution).
+  let store = jbool_field(msg.content, "store_history", default=true)
+  let count = if store { k.exec_count + 1 } else { k.exec_count }
+  if store {
+    k.exec_count = count
+  }
   k.parent = Some(msg.header)
 
   let code = @jupyter.jstr_field(msg.content, "code")
   log_kernel(k, LogLevel::Info, "executing cell \{count}: \{code}")
 
   // Keep the last 100 cells for history_request.
-  k.history.push((count, code))
-  if k.history.length() > 100 {
-    k.history = drop_first(k.history, k.history.length() - 100)
+  if store {
+    k.history.push((count, code))
+    if k.history.length() > 100 {
+      k.history = drop_first(k.history, k.history.length() - 100)
+    }
   }
   
   publish(
@@ -576,9 +586,12 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
     ]),
   )
   
-  run_cell(k, code, fn(ok, ename, evalue, traceback) {
+  run_cell(k, code, fn(ok, ename, evalue, traceback, duration_ms) {
+    let meta = @jupyter.obj([
+      ("moonjupyter", @jupyter.obj([("duration_ms", Json::number(duration_ms.to_double()))])),
+    ])
     if ok {
-      log_kernel(k, LogLevel::Info, "cell \{count} executed successfully")
+      log_kernel(k, LogLevel::Info, "cell \{count} executed successfully in \{duration_ms}ms")
       reply(
         k,
         peer,
@@ -588,7 +601,7 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
           ("execution_count", Json::number(count.to_double())),
           ("payload", Json::array([])),
           ("user_expressions", @jupyter.obj([])),
-          ("metadata", @jupyter.obj([])),
+          ("metadata", meta),
         ]),
         msg,
       )
@@ -604,6 +617,7 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
           ("ename", Json::string(ename)),
           ("evalue", Json::string(evalue)),
           ("traceback", lines_json(traceback)),
+          ("metadata", meta),
         ]),
         msg,
       )
@@ -718,11 +732,12 @@ fn s_less(a : String, b : String) -> Bool {
 const CELL_TIMEOUT_MS : Int = 60000
 
 ///|
-/// Execute a cell in a temporary MoonBit project via `moon run`.
+/// Execute a cell in a temporary MoonBit project via `moon run`. `on_done`
+/// receives (success, ename, evalue, traceback, wall-time in ms).
 fn run_cell(
   k : Kernel,
   code : String,
-  on_done : (Bool, String, String, String) -> Unit,
+  on_done : (Bool, String, String, String, Int) -> Unit,
 ) -> Unit {
   let dir = @nodeff.mkdtemp()
   @nodeff.write_text(
@@ -753,15 +768,16 @@ fn run_cell(
         return // aborted; timeout/interrupt path already reported
       }
       k.cell_pid = -1
-      k.metrics.execution_time["exec-\{k.exec_count}"] = @nodeff.elapsed_ms() - started
+      let duration_ms = @nodeff.elapsed_ms() - started
+      k.metrics.execution_time["exec-\{k.exec_count}"] = duration_ms
       flush_pending(k, out_buf, "stdout")
       flush_pending(k, err_buf, "stderr")
       if k.cell_interrupted {
         k.metrics.error_count = k.metrics.error_count + 1
         log_kernel(k, LogLevel::Warn, "cell \{k.exec_count} interrupted")
-        on_done(false, "KeyboardInterrupt", "execution interrupted", "")
+        on_done(false, "KeyboardInterrupt", "execution interrupted", "", duration_ms)
       } else if exit_code == 0 {
-        on_done(true, "", "", "")
+        on_done(true, "", "", "", duration_ms)
       } else {
         k.metrics.error_count = k.metrics.error_count + 1
         on_done(
@@ -769,6 +785,7 @@ fn run_cell(
           "MoonBitError",
           "cell exited with code \{exit_code}",
           last_lines(err_buf, 8),
+          duration_ms,
         )
       }
       @nodeff.rmrf(dir)
@@ -784,7 +801,8 @@ fn run_cell(
       )
       @nodeff.kill_tree(k.cell_pid)
       k.cell_pid = -1
-      k.metrics.execution_time["exec-\{k.exec_count}"] = @nodeff.elapsed_ms() - started
+      let duration_ms = @nodeff.elapsed_ms() - started
+      k.metrics.execution_time["exec-\{k.exec_count}"] = duration_ms
       k.metrics.error_count = k.metrics.error_count + 1
       @nodeff.rmrf(dir)
       on_done(
@@ -792,6 +810,7 @@ fn run_cell(
         "CellTimeout",
         "cell exceeded \{CELL_TIMEOUT_MS / 1000}s and was terminated",
         "",
+        duration_ms,
       )
     }
   })

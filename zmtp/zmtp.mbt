@@ -51,11 +51,20 @@ pub struct ZmtpSession {
   mut buf : Array[Byte]
   mut pos : Int
   mut pending : Array[Bytes]
+  /// set when a frame violates the size limit; feed() turns it into an
+  /// Error event and closes the session
+  mut frame_error : String
 }
 
 ///|
+/// Hard cap on a single declared frame size. A peer announcing a huge
+/// frame (or a wrapped 8-byte size that reads as negative) must not be
+/// able to make the session buffer unbounded data.
+const MAX_FRAME_BYTES : Int = 64 * 1024 * 1024
+
+///|
 pub fn ZmtpSession::new() -> ZmtpSession {
-  { state: AwGreet, buf: [], pos: 0, pending: [], }
+  { state: AwGreet, buf: [], pos: 0, pending: [], frame_error: "", }
 }
 
 ///|
@@ -169,6 +178,9 @@ fn frame_bytes(body : Bytes, more : Bool, command : Bool) -> Bytes {
 
 ///|
 pub fn ZmtpSession::feed(self : ZmtpSession, data : Bytes) -> Array[ZmtpEvent] {
+  if self.state == Closed {
+    return []
+  }
   for i = 0; i < data.length(); i = i + 1 {
     self.buf.push(data[i])
   }
@@ -217,7 +229,7 @@ pub fn ZmtpSession::feed(self : ZmtpSession, data : Bytes) -> Array[ZmtpEvent] {
             events.push(Error("data frame before READY"))
           }
         }
-        None => ()
+        None => raise_frame_error(self, events)
       }
     } else if self.state == Est {
       match self.try_frame() {
@@ -236,7 +248,7 @@ pub fn ZmtpSession::feed(self : ZmtpSession, data : Bytes) -> Array[ZmtpEvent] {
             }
           }
         }
-        None => ()
+        None => raise_frame_error(self, events)
       }
     } else {
       ()
@@ -252,6 +264,17 @@ pub fn ZmtpSession::feed(self : ZmtpSession, data : Bytes) -> Array[ZmtpEvent] {
     self.pos = 0
   }
   events
+}
+
+///|
+/// Convert a recorded frame-size violation into an Error event and close
+/// the session.
+fn raise_frame_error(s : ZmtpSession, events : Array[ZmtpEvent]) -> Unit {
+  if s.frame_error != "" {
+    events.push(Error(s.frame_error))
+    s.state = Closed
+    s.frame_error = ""
+  }
 }
 
 ///|
@@ -305,6 +328,10 @@ fn ZmtpSession::try_frame(self : ZmtpSession) -> ZFrame? {
     }
     size = self.buf[base + 1].to_int()
   }
+  self.size_error(size)
+  if self.frame_error != "" {
+    return None
+  }
   if avail < hdr + size {
     return None
   }
@@ -314,6 +341,15 @@ fn ZmtpSession::try_frame(self : ZmtpSession) -> ZFrame? {
   }
   self.pos = base + hdr + size
   Some({ flags, body, })
+}
+
+///|
+/// Size sanity check shared by both frame encodings; records an error on
+/// the session when the declared size is impossible or abusive.
+fn ZmtpSession::size_error(self : ZmtpSession, size : Int) -> Unit {
+  if size < 0 || size > MAX_FRAME_BYTES {
+    self.frame_error = "declared frame size \{size} exceeds limit \{MAX_FRAME_BYTES}"
+  }
 }
 
 ///|
@@ -473,6 +509,44 @@ test "byte-by-byte feed and long frames" {
       assert_eq(frames.length(), 1)
       assert_eq(frames[0].length(), 300)
     }
+    _ => assert_true(false)
+  }
+}
+
+///|
+test "oversized declared frame size closes the session" {
+  let s = ZmtpSession::new()
+  let _ = s.feed(greeting_bytes(true))
+  let _ = s.feed(ready_command("DEALER"))
+  // declare a LONG frame of 2 GiB (over the 64 MiB cap) but never send it
+  let hdr : Array[Byte] = [@bx.u8(0x02)]
+  let n = 0x80000000
+  for shift = 56; shift >= 0; shift = shift - 8 {
+    hdr.push(@bx.u8((n >> shift) & 0xFF))
+  }
+  let events = s.feed(Bytes::from_array(hdr))
+  assert_eq(events.length(), 1)
+  match events[0] {
+    Error(_) => ()
+    _ => assert_true(false)
+  }
+  // session is closed: further input is ignored
+  assert_eq(s.feed(b"hello").length(), 0)
+}
+
+///|
+test "negative (wrapped) declared size also errors" {
+  let s = ZmtpSession::new()
+  let _ = s.feed(greeting_bytes(true))
+  let _ = s.feed(ready_command("DEALER"))
+  // 8-byte size 0xFFFFFFFFFFFFFFFF wraps Int to -1
+  let hdr : Array[Byte] = [@bx.u8(0x02)]
+  for _i = 0; _i < 8; _i = _i + 1 {
+    hdr.push(@bx.u8(0xFF))
+  }
+  let events = s.feed(Bytes::from_array(hdr))
+  match events[0] {
+    Error(_) => ()
     _ => assert_true(false)
   }
 }

@@ -17,12 +17,17 @@ Notebook 中交互式运行 MoonBit 代码。项目同时包含一个可独立�
 ## Features
 
 - **ZMTP 3.1**（纯 MoonBit，零 FFI）：greeting/NULL 安全机制/READY 握手、
-  MORE/LONG/COMMAND 帧编解码、PING/PONG、可逐字节喂入的会话状态机
+  MORE/LONG/COMMAND 帧编解码、PING/PONG、可逐字节喂入的会话状态机、
+  64 MiB 帧大小上限（协议级 DoS 防护）
 - **Jupyter 协议 v5.4**：`<IDS|MSG>` 信封、HMAC-SHA256 签名（内置纯 MoonBit
   SHA-256/HMAC）、连接文件解析、UUID v4
 - **五个通道**：shell/control/stdin（ROUTER）、iopub（PUB）、hb（REP 心跳回显）
 - **cell 执行**：临时项目 + `moon run`，stdout/stderr 按行流式回传 iopub，
-  成功/错误分别产出 execute_reply
+  成功/错误分别产出 execute_reply，metadata 携带真实执行耗时
+- **交互体验**：TAB 补全（关键字 + 当前 cell 标识符）、`is_complete` 括号配对
+  启发式（未闭合的 cell 不会误执行）、执行历史（最近 100 个 cell）
+- **健壮性**：cell 60s 超时强杀（杀进程树，覆盖死循环）、interrupt_request
+  真正中断当前 cell、shutdown 回显 restart 标志、消息帧 16 MiB 上限
 - 跨平台：通过 Node.js 传输层运行（Windows/macOS/Linux）✨
 
 ## Quick Start
@@ -115,6 +120,9 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 ## Changelog
 
+- **v0.1.6** — ZMTP 层帧大小上限与会话关闭短路（协议级 DoS 加固），execute
+  尊重 store_history，execute_reply metadata 携带真实耗时，断连清理 peer
+  计数，README 功能文档更新
 - **v0.1.5** — fix Date.now() Int32 overflow in nodeff FFI, recurring
   periodic stats/maintenance timers (`every()`), real per-cell execution
   timing and failure counting in metrics, kernel_info reports the actual
