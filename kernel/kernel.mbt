@@ -107,9 +107,9 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
     "control=\{conn.control_port} hb=\{conn.hb_port})"
   )
   
-  // Start periodic status logging
-  @nodeff.later(30000, fn() { log_kernel_stats(kernel) })
-  @nodeff.later(60000, fn() { cleanup_inactive_peers(kernel) })
+  // Periodic status logging and maintenance
+  @nodeff.every(30000, fn() { log_kernel_stats(kernel) })
+  @nodeff.every(60000, fn() { cleanup_inactive_peers(kernel) })
 }
 
 ///|
@@ -463,6 +463,7 @@ fn run_cell(
     "fn main {\n  " + code + "\n}\n"
   }
   @nodeff.write_text(dir + "/src/main/main.mbt", src)
+  let started = @nodeff.elapsed_ms()
   let mut out_buf = ""
   let mut err_buf = ""
   @nodeff.spawn_process(
@@ -473,9 +474,11 @@ fn run_cell(
     fn(exit_code) {
       flush_pending(k, out_buf, "stdout")
       flush_pending(k, err_buf, "stderr")
+      k.metrics.execution_time["exec-\{k.exec_count}"] = @nodeff.elapsed_ms() - started
       if exit_code == 0 {
         on_done(true, "", "", "")
       } else {
+        k.metrics.error_count = k.metrics.error_count + 1
         on_done(
           false,
           "MoonBitError",

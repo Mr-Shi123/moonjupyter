@@ -103,7 +103,8 @@ extern "js" fn js_iso_now() -> String =
   #|(() => new Date().toISOString())
 
 ///|
-extern "js" fn js_now_ms() -> Int =
+/// Epoch milliseconds as Double: Date.now() (~1.7e12) overflows a 32-bit Int.
+extern "js" fn js_now_ms() -> Double =
   #|(() => Date.now())
 
 ///|
@@ -241,9 +242,13 @@ pub fn iso_now() -> String {
 }
 
 ///|
-/// Wall-clock time as Unix epoch seconds.
+/// Process start time in epoch milliseconds (captured at module init).
+let boot_ms : Double = js_now_ms()
+
+///|
+/// Wall-clock time as Unix epoch seconds. Fits a 32-bit Int until 2038.
 pub fn now_seconds() -> Int {
-  js_now_ms() / 1000
+  (js_now_ms() / 1000.0).to_int()
 }
 
 ///|
@@ -271,4 +276,21 @@ pub fn eprint(s : String) -> Unit {
 /// Run `cb` after `ms` milliseconds.
 pub fn later(ms : Int, cb : () -> Unit) -> Unit {
   js_later(ms, cb)
+}
+
+///|
+extern "js" fn js_every(ms : Int, cb : () -> Unit) -> Unit =
+  #|(ms, cb) => setInterval(cb, ms)
+
+///|
+/// Run `cb` every `ms` milliseconds until the process exits.
+pub fn every(ms : Int, cb : () -> Unit) -> Unit {
+  js_every(ms, cb)
+}
+
+///|
+/// Milliseconds elapsed since this process started. Fits an Int regardless
+/// of uptime, unlike raw epoch milliseconds.
+pub fn elapsed_ms() -> Int {
+  (js_now_ms() - boot_ms).to_int()
 }
