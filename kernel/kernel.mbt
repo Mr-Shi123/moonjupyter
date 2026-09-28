@@ -332,19 +332,29 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
         msg,
       )
     }
-    "inspect_request" =>
+    "inspect_request" => {
+      let code = @jupyter.jstr_field(msg.content, "code")
+      let cursor = @jupyter.jint_field(msg.content, "cursor_pos")
+      let (_start, _end, token) = token_at(code, cursor)
+      let doc = lookup_doc(token)
+      let data = match doc {
+        Some(text) =>
+          @jupyter.obj([("text/plain", Json::string(text))])
+        None => @jupyter.obj([])
+      }
       reply(
         k,
         peer,
         "inspect_reply",
         @jupyter.obj([
           ("status", Json::string("ok")),
-          ("found", Json::boolean(false)),
-          ("data", @jupyter.obj([])),
+          ("found", Json::boolean(doc is Some(_))),
+          ("data", data),
           ("metadata", @jupyter.obj([])),
         ]),
         msg,
       )
+    }
     "history_request" =>
       reply(
         k,
@@ -376,6 +386,13 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
         @jupyter.obj([("execution_state", Json::string("idle"))]),
       )
       log_kernel(k, LogLevel::Info, "shutdown requested (restart=\{restart})")
+      // Do not orphan a running cell's process tree (on Unix the child is
+      // spawned detached and would outlive us).
+      if k.cell_pid > 0 {
+        log_kernel(k, LogLevel::Warn, "shutdown: killing running cell (pid \{k.cell_pid})")
+        @nodeff.kill_tree(k.cell_pid)
+        k.cell_pid = -1
+      }
       @nodeff.later(300, fn() { @nodeff.exit(0) })
     }
     "interrupt_request" => {
@@ -459,6 +476,67 @@ fn lines_json(s : String) -> Json {
     out.push(Json::string(l))
   }
   Json::array(out)
+}
+
+///|
+/// The identifier token surrounding `cursor_pos` (both directions), for
+/// inspect requests.
+fn token_at(code : String, cursor_pos : Int) -> (Int, Int, String) {
+  let clamped = if cursor_pos > code.length() { code.length() } else { cursor_pos }
+  let mut start = clamped
+  while start > 0 && is_ident_char(code[start - 1]) {
+    start = start - 1
+  }
+  let mut end = clamped
+  while end < code.length() && is_ident_char(code[end]) {
+    end = end + 1
+  }
+  (start, end, @bx.sslice(code, start, end))
+}
+
+///|
+/// Short documentation for keywords and common builtins, served to
+/// Shift+Tab (inspect_request) queries.
+fn lookup_doc(word : String) -> String? {
+  match word {
+    "println" =>
+      Some(
+        "println(value) — print a value to standard output followed by a newline.",
+      )
+    "print" =>
+      Some("print(value) — print a value to standard output without a trailing newline.")
+    "let" =>
+      Some(
+        "let binds an immutable value; use `let mut` for a mutable binding.\n\nlet x = 1\nlet mut y = 2",
+      )
+    "fn" =>
+      Some(
+        "fn defines a function.\n\nfn add(a : Int, b : Int) -> Int {\n  a + b\n}",
+      )
+    "match" =>
+      Some(
+        "match destructures a value by pattern.\n\nmatch x {\n  0 => \"zero\"\n  _ => \"other\"\n}",
+      )
+    "while" =>
+      Some("while repeats a block while its condition holds.\n\nwhile i < 10 {\n  i = i + 1\n}")
+    "for" =>
+      Some("for iterates over ranges or collections.\n\nfor i in 0..<5 {\n  println(i)\n}")
+    "if" =>
+      Some(
+        "if evaluates one of two branches by condition. It is also an expression:\n\nlet m = if a > b { a } else { b }",
+      )
+    "struct" =>
+      Some("struct defines a record type.\n\nstruct Point {\n  x : Int\n  y : Int\n}")
+    "enum" =>
+      Some(
+        "enum defines a sum type.\n\nenum Shape {\n  Circle(Double)\n  Square(Double)\n}",
+      )
+    "loop" =>
+      Some("loop repeats until a `break` inside its body.\n\nloop {\n  ...\n}")
+    "to_string" => Some("to_string() renders a value as a String.")
+    "length" => Some("length() returns the number of elements (for strings: UTF-16 code units).")
+    _ => None
+  }
 }
 
 ///|
@@ -585,7 +663,37 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
       ("execution_count", Json::number(count.to_double())),
     ]),
   )
-  
+
+  // Kernel magic commands (MoonBit never starts a top-level statement
+  // with '%'), handled synchronously without spawning `moon run`.
+  let magic = parse_magic(k, code)
+  match magic {
+    Some(output) => {
+      log_kernel(k, LogLevel::Info, "magic command: \{code}")
+      publish_stream(k, "stdout", output)
+      reply(
+        k,
+        peer,
+        "execute_reply",
+        @jupyter.obj([
+          ("status", Json::string("ok")),
+          ("execution_count", Json::number(count.to_double())),
+          ("payload", Json::array([])),
+          ("user_expressions", @jupyter.obj([])),
+          ("metadata", @jupyter.obj([])),
+        ]),
+        msg,
+      )
+      publish(
+        k,
+        "status",
+        @jupyter.obj([("execution_state", Json::string("idle"))]),
+      )
+      return
+    }
+    None => ()
+  }
+
   run_cell(k, code, fn(ok, ename, evalue, traceback, duration_ms) {
     let meta = @jupyter.obj([
       ("moonjupyter", @jupyter.obj([("duration_ms", Json::number(duration_ms.to_double()))])),
@@ -861,6 +969,82 @@ fn flush_pending(k : Kernel, buf : String, name : String) -> Unit {
 }
 
 ///|
+/// Publish a complete `stream` message (used by magic commands).
+fn publish_stream(k : Kernel, name : String, text : String) -> Unit {
+  publish(
+    k,
+    "stream",
+    @jupyter.obj([("name", Json::string(name)), ("text", Json::string(text))]),
+  )
+}
+
+///|
+/// Kernel magic commands: cells starting with '%' are interpreted by the
+/// kernel itself instead of being compiled with `moon run` (MoonBit never
+/// begins a top-level statement with '%').
+fn parse_magic(k : Kernel, code : String) -> String? {
+  // skip leading whitespace
+  let mut i = 0
+  while i < code.length() && (code[i] == 32 || code[i] == 9 || code[i] == 10) {
+    i = i + 1
+  }
+  if i >= code.length() || code[i] != 37 {
+    return None // not '%'
+  }
+  let mut end = i + 1
+  while end < code.length() && is_ident_char(code[end]) {
+    end = end + 1
+  }
+  let name = @bx.sslice(code, i + 1, end)
+  match name {
+    "help" =>
+      Some(
+        "moonjupyter magic commands:\n" +
+        "  %help     — show this list\n" +
+        "  %history  — show the last executed cells\n" +
+        "  %stats    — show kernel performance statistics",
+      )
+    "history" => {
+      let mut out = "recent cells:\n"
+      for entry in k.history {
+        let (n, c) = entry
+        out = out + "  \{n}: \{c}\n"
+      }
+      if k.history.length() == 0 {
+        out = out + "  (none yet)\n"
+      }
+      Some(out)
+    }
+    "stats" => {
+      let stats = get_performance_stats(k)
+      let mut out = "kernel performance stats:\n"
+      match stats {
+        Json::Object(fields) =>
+          for key, value in fields {
+            out = out + "  \{key}: \{json_scalar(value)}\n"
+          }
+        _ => ()
+      }
+      Some(out)
+    }
+    _ => Some("unknown magic command %\{name} — try %help")
+  }
+}
+
+///|
+/// Render a scalar JSON value for the %stats listing.
+fn json_scalar(j : Json) -> String {
+  match j {
+    Json::Number(d, ..) => d.to_string()
+    Json::String(s) => s
+    Json::True => "true"
+    Json::False => "false"
+    Json::Null => "null"
+    _ => j.stringify()
+  }
+}
+
+///|
 fn last_lines(buf : String, count : Int) -> String {
   let lines = buf.split("\n")
     |> Iter::to_array
@@ -1132,4 +1316,56 @@ test "lines_json splits on newline" {
     }
     _ => assert_true(false)
   }
+}
+
+///|
+test "magic command recognition" {
+  // "%help" recognized (with or without leading whitespace)
+  assert_true(parse_magic_help_shape("%help") is Some(_))
+  assert_true(parse_magic_help_shape("  %help") is Some(_))
+  // regular MoonBit code (even containing '%') is not a magic command
+  assert_true(parse_magic_help_shape("let pct = 50 % 3") is None)
+  assert_true(parse_magic_help_shape("") is None)
+}
+
+///|
+/// Parse only the magic name (no kernel state needed) for tests.
+fn parse_magic_help_shape(code : String) -> String? {
+  let mut i = 0
+  while i < code.length() && (code[i] == 32 || code[i] == 9 || code[i] == 10) {
+    i = i + 1
+  }
+  if i >= code.length() || code[i] != 37 {
+    return None
+  }
+  let mut end = i + 1
+  while end < code.length() && is_ident_char(code[end]) {
+    end = end + 1
+  }
+  let name = @bx.sslice(code, i + 1, end)
+  if name == "help" {
+    Some(name)
+  } else {
+    None
+  }
+}
+
+///|
+test "token_at spans the full identifier" {
+  let code = "let value = 1"
+  // cursor inside "value" (position 6)
+  let (start, end, token) = token_at(code, 6)
+  assert_eq(start, 4)
+  assert_eq(end, 9)
+  assert_eq(token, "value")
+  // cursor at end of code
+  let (_s, _e, tail) = token_at(code, 13)
+  assert_eq(tail, "1")
+}
+
+///|
+test "lookup_doc finds known builtins" {
+  assert_true(lookup_doc("println") is Some(_))
+  assert_true(lookup_doc("match") is Some(_))
+  assert_true(lookup_doc("definitely_not_a_thing") is None)
 }
