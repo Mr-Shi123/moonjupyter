@@ -69,6 +69,8 @@ priv struct Kernel {
   /// bumped on every run_cell; stale timers from earlier cells compare
   /// against it and stand down
   mut run_seq : Int
+  /// MoonBit toolchain version, detected at startup ("dev" if unknown)
+  mut language_version : String
 }
 
 ///|
@@ -102,6 +104,7 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
     cell_pid: -1,
     cell_interrupted: false,
     run_seq: 0,
+    language_version: "dev",
   }
   let shell = Channel::new("shell", "ROUTER")
   let control = Channel::new("control", "ROUTER")
@@ -124,6 +127,7 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
   // Periodic status logging and maintenance
   @nodeff.every(30000, fn() { log_kernel_stats(kernel) })
   @nodeff.every(60000, fn() { cleanup_inactive_peers(kernel) })
+  detect_language_version(kernel)
 }
 
 ///|
@@ -291,16 +295,19 @@ fn handle_message(
 fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
   match msg.msg_type {
     "kernel_info_request" =>
-      reply(k, peer, "kernel_info_reply", kernel_info(), msg)
+      reply(k, peer, "kernel_info_reply", kernel_info(k), msg)
     "execute_request" => handle_execute(k, peer, msg)
-    "is_complete_request" =>
+    "is_complete_request" => {
+      let code = @jupyter.jstr_field(msg.content, "code")
+      let status = if brackets_balanced(code) { "complete" } else { "incomplete" }
       reply(
         k,
         peer,
         "is_complete_reply",
-        @jupyter.obj([("status", Json::string("complete"))]),
+        @jupyter.obj([("status", Json::string(status))]),
         msg,
       )
+    }
     "complete_request" => {
       let code = @jupyter.jstr_field(msg.content, "code")
       let cursor = @jupyter.jint_field(msg.content, "cursor_pos")
@@ -348,13 +355,16 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
         msg,
       )
     "shutdown_request" => {
+      // Echo the client's restart flag so jupyter_client knows whether to
+      // relaunch this kernel after exit.
+      let restart = jbool_field(msg.content, "restart")
       reply(
         k,
         peer,
         "shutdown_reply",
         @jupyter.obj([
           ("status", Json::string("ok")),
-          ("restart", Json::boolean(false)),
+          ("restart", Json::boolean(restart)),
         ]),
         msg,
       )
@@ -363,6 +373,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
         "status",
         @jupyter.obj([("execution_state", Json::string("idle"))]),
       )
+      log_kernel(k, LogLevel::Info, "shutdown requested (restart=\{restart})")
       @nodeff.later(300, fn() { @nodeff.exit(0) })
     }
     "interrupt_request" => {
@@ -388,7 +399,6 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
   }
 }
 
-///|
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
@@ -422,7 +432,74 @@ fn history_json(entries : Array[(Int, String)]) -> Json {
 }
 
 ///|
-fn kernel_info() -> Json {
+/// Read a boolean field out of a JSON object, defaulting to false.
+fn jbool_field(j : Json, key : String) -> Bool {
+  match j {
+    Json::Object(fields) =>
+      match fields.get(key) {
+        Some(Json::True) => true
+        _ => false
+      }
+    _ => false
+  }
+}
+
+///|
+/// Multi-line text as a JSON array of lines, the shape Jupyter renders
+/// properly for tracebacks.
+fn lines_json(s : String) -> Json {
+  let lines = s.split("\n")
+    |> Iter::to_array
+    |> Array::map(fn(v) { v.to_owned() })
+  let out : Array[Json] = []
+  for l in lines {
+    out.push(Json::string(l))
+  }
+  Json::array(out)
+}
+
+///|
+/// Bracket-balance heuristic for is_complete_request: a cell with an
+/// unclosed (, [ or { (outside string literals) is not complete and the
+/// console keeps waiting for more input instead of executing.
+fn brackets_balanced(code : String) -> Bool {
+  let mut paren = 0
+  let mut brack = 0
+  let mut brace = 0
+  let mut in_str = false
+  let mut i = 0
+  while i < code.length() {
+    let c = code[i]
+    if in_str {
+      if c == 92 {
+        i = i + 2 // skip the escaped character
+        continue
+      }
+      if c == 34 {
+        in_str = false
+      }
+    } else if c == 34 {
+      in_str = true
+    } else if c == 40 {
+      paren = paren + 1
+    } else if c == 41 {
+      paren = paren - 1
+    } else if c == 91 {
+      brack = brack + 1
+    } else if c == 93 {
+      brack = brack - 1
+    } else if c == 123 {
+      brace = brace + 1
+    } else if c == 125 {
+      brace = brace - 1
+    }
+    i = i + 1
+  }
+  paren == 0 && brack == 0 && brace == 0
+}
+
+///|
+fn kernel_info(k : Kernel) -> Json {
   @jupyter.obj([
     ("status", Json::string("ok")),
     ("protocol_version", Json::string("5.4")),
@@ -432,7 +509,7 @@ fn kernel_info() -> Json {
       "language_info",
       @jupyter.obj([
         ("name", Json::string("moonbit")),
-        ("version", Json::string("dev")),
+        ("version", Json::string(k.language_version)),
         ("mimetype", Json::string("text/x-moonbit")),
         ("file_extension", Json::string(".mbt")),
       ]),
@@ -440,11 +517,34 @@ fn kernel_info() -> Json {
     (
       "banner",
       Json::string(
-        "MoonBit kernel (moonjupyter) \{KERNEL_VERSION} — each cell runs via `moon run` in a scratch project",
+        "MoonBit kernel (moonjupyter) \{KERNEL_VERSION} (toolchain \{k.language_version}) — each cell runs via `moon run` in a scratch project",
       ),
     ),
     ("help_links", Json::array([])),
   ])
+}
+
+///|
+/// Ask the `moon` CLI for its version; the first output line is stored as
+/// the kernel's language version. Falls back to "dev" if unavailable.
+fn detect_language_version(k : Kernel) -> Unit {
+  @nodeff.spawn_process(
+    ".",
+    "moon version",
+    fn(chunk) {
+      if k.language_version == "dev" {
+        let first = chunk.split("\n")
+          |> Iter::to_array
+          |> Array::map(fn(v) { v.to_owned() })
+        if first.length() > 0 && first[0].contains("moon") {
+          k.language_version = first[0]
+        }
+      }
+    },
+    fn(_err) { () },
+    fn(_code) { () },
+    fn(_pid) { () },
+  )
 }
 
 ///|
@@ -503,7 +603,7 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
           ("execution_count", Json::number(count.to_double())),
           ("ename", Json::string(ename)),
           ("evalue", Json::string(evalue)),
-          ("traceback", Json::array([Json::string(traceback)])),
+          ("traceback", lines_json(traceback)),
         ]),
         msg,
       )
@@ -982,6 +1082,32 @@ test "history payload shape" {
             _ => assert_true(false)
           }
         }
+        _ => assert_true(false)
+      }
+    }
+    _ => assert_true(false)
+  }
+}
+
+///|
+test "brackets balanced heuristic" {
+  assert_true(brackets_balanced("let x = f(1, 2)\nprintln(x)"))
+  // unclosed paren -> incomplete
+  assert_false(brackets_balanced("println(\"abc\""))
+  assert_false(brackets_balanced("let a = [1, 2"))
+  // braces inside string literals must not count
+  assert_true(brackets_balanced("let s = \"{[( \"\nprintln(s)"))
+  // escaped quote inside a string
+  assert_true(brackets_balanced("println(\"a \\\" ( \")"))
+}
+
+///|
+test "lines_json splits on newline" {
+  match lines_json("line1\nline2") {
+    Json::Array(items) => {
+      assert_eq(items.length(), 2)
+      match items[1] {
+        Json::String(s) => assert_eq(s, "line2")
         _ => assert_true(false)
       }
     }
