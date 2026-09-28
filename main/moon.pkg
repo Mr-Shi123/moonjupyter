@@ -4,7 +4,8 @@ import {
   "moonjupyter/moonjupyter/nodeff",
 }
 
+pkgtype(kind: "executable")
+
 options(
-  "is-main": true,
   link: { "js": { "format": "cjs" } },
 )

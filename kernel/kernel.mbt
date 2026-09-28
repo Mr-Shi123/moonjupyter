@@ -31,9 +31,9 @@ pub fn show_log_level(level : LogLevel) -> String {
 /// Performance metrics and statistics
 priv struct PerformanceMetrics {
   mut message_count : Int
-  execution_time : Map[String, Int] // msg_id -> milliseconds
+  mut execution_time : Map[String, Int] // msg_id -> milliseconds
   mut error_count : Int
-  throughput : Map[Int, Double] // 1-minute window index -> messages seen
+  mut throughput : Map[Int, Double] // 1-minute window index -> messages seen
 }
 
 ///|
@@ -71,6 +71,10 @@ priv struct Kernel {
   mut run_seq : Int
   /// MoonBit toolchain version, detected at startup ("dev" if unknown)
   mut language_version : String
+  /// extra modules declared via %use, added to every cell project
+  mut cell_deps : Array[(String, String)] // (module, version)
+  /// package paths imported into every cell project
+  cell_imports : Array[String]
 }
 
 ///|
@@ -105,6 +109,8 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
     cell_interrupted: false,
     run_seq: 0,
     language_version: "dev",
+    cell_deps: [],
+    cell_imports: [],
   }
   let shell = Channel::new("shell", "ROUTER")
   let control = Channel::new("control", "ROUTER")
@@ -116,14 +122,16 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
   bind_channel(kernel, stdin, conn.ip, conn.stdin_port)
   bind_channel(kernel, iopub, conn.ip, conn.iopub_port)
   bind_channel(kernel, hb, conn.ip, conn.hb_port)
-  
+
   // Log kernel startup
-  log_kernel(kernel, LogLevel::Info, 
+  log_kernel(
+    kernel,
+    LogLevel::Info,
     "kernel \{kernel.session_id} listening on \{conn.ip} " +
     "(shell=\{conn.shell_port} iopub=\{conn.iopub_port} stdin=\{conn.stdin_port} " +
-    "control=\{conn.control_port} hb=\{conn.hb_port})"
+    "control=\{conn.control_port} hb=\{conn.hb_port})",
   )
-  
+
   // Periodic status logging and maintenance
   @nodeff.every(30000, fn() { log_kernel_stats(kernel) })
   @nodeff.every(60000, fn() { cleanup_inactive_peers(kernel) })
@@ -133,7 +141,7 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
 ///|
 fn Channel::new(name : String, socket_type : String) -> Channel {
   let peers : Map[Int, Peer] = Map([])
-  { name, socket_type, peers }
+  { name, socket_type, peers, }
 }
 
 ///|
@@ -143,7 +151,11 @@ fn bind_channel(k : Kernel, ch : Channel, ip : String, port : Int) -> Unit {
     ip,
     port,
     fn(id) {
-      let peer = Peer::{ id, session: @zmtp.ZmtpSession::new(), identities: [] }
+      let peer = Peer::{
+        id,
+        session: @zmtp.ZmtpSession::new(),
+        identities: [],
+      }
       ch.peers[id] = peer
       if ch.name == "iopub" {
         k.iopub = Some(peer)
@@ -151,14 +163,17 @@ fn bind_channel(k : Kernel, ch : Channel, ip : String, port : Int) -> Unit {
       // ZMTP 3.1: the listening side sends its greeting immediately on
       // connect, before any command or message traffic.
       @nodeff.tcp_send(id, @zmtp.greeting_bytes(true))
-      log_kernel(k, LogLevel::Info, "peer \{id} connected to \{ch.name} channel")
+      log_kernel(
+        k,
+        LogLevel::Info,
+        "peer \{id} connected to \{ch.name} channel",
+      )
     },
     fn(id, data) {
       match ch.peers.get(id) {
         Some(peer) => on_peer_data(k, ch, peer, data)
-        None => {
+        None =>
           log_kernel(k, LogLevel::Warn, "received data from unknown peer \{id}")
-        }
       }
     },
     fn(id) {
@@ -177,10 +192,10 @@ fn bind_channel(k : Kernel, ch : Channel, ip : String, port : Int) -> Unit {
 fn log_kernel(k : Kernel, level : LogLevel, message : String) -> Unit {
   let timestamp = @nodeff.iso_now()
   let log_entry = "[\{timestamp}] [\{show_log_level(level)}] \{message}"
-  
+
   // Add to buffer for later analysis
   k.log_buffer.push(log_entry)
-  
+
   // Keep only last 1000 log entries to prevent memory growth
   if k.log_buffer.length() > 1000 {
     let len = k.log_buffer.length()
@@ -190,7 +205,7 @@ fn log_kernel(k : Kernel, level : LogLevel, message : String) -> Unit {
     }
     k.log_buffer = new_buffer
   }
-  
+
   // Output to stderr based on level
   match level {
     LogLevel::Debug => @nodeff.eprint(log_entry)
@@ -209,14 +224,14 @@ fn send_raw(peer : Peer, data : Bytes) -> Unit {
 ///|
 fn on_peer_data(k : Kernel, ch : Channel, peer : Peer, data : Bytes) -> Unit {
   peer.identities.push(data)
-  
+
   // Update peer message count
   let current_count = match k.peer_stats.get(peer.id) {
     Some(count) => count
     None => 0
   }
   k.peer_stats[peer.id] = current_count + 1
-  
+
   let events = peer.session.feed(data)
   for ev in events {
     match ev {
@@ -226,14 +241,25 @@ fn on_peer_data(k : Kernel, ch : Channel, peer : Peer, data : Bytes) -> Unit {
       }
       @zmtp.PeerReady(_) => ()
       @zmtp.PingReceived(context) => {
-        log_kernel(k, LogLevel::Debug, "ping from peer \{peer.id} on \{ch.name}")
+        log_kernel(
+          k,
+          LogLevel::Debug,
+          "ping from peer \{peer.id} on \{ch.name}",
+        )
         send_raw(peer, @zmtp.pong_command(context))
       }
-      @zmtp.Error(reason) => {
-        log_kernel(k, LogLevel::Error, "peer \{peer.id} error on \{ch.name}: \{reason}")
-      }
+      @zmtp.Error(reason) =>
+        log_kernel(
+          k,
+          LogLevel::Error,
+          "peer \{peer.id} error on \{ch.name}: \{reason}",
+        )
       @zmtp.Message(frames) => {
-        log_kernel(k, LogLevel::Debug, "peer \{peer.id} message on \{ch.name}: \{frames.length()} frames")
+        log_kernel(
+          k,
+          LogLevel::Debug,
+          "peer \{peer.id} message on \{ch.name}: \{frames.length()} frames",
+        )
         handle_message(k, ch, peer, frames)
       }
     }
@@ -276,7 +302,11 @@ fn handle_message(
   match @jupyter.parse_message(frames, k.key, @nodeff.inflate) {
     Err(e) => {
       k.metrics.error_count = k.metrics.error_count + 1
-      log_kernel(k, LogLevel::Error, "failed to parse message on \{ch.name}: \{e}")
+      log_kernel(
+        k,
+        LogLevel::Error,
+        "failed to parse message on \{ch.name}: \{e}",
+      )
       @nodeff.eprint("[moonjupyter] \{ch.name}: \{e}")
     }
     Ok(msg) => {
@@ -301,7 +331,11 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
     "execute_request" => handle_execute(k, peer, msg)
     "is_complete_request" => {
       let code = @jupyter.jstr_field(msg.content, "code")
-      let status = if brackets_balanced(code) { "complete" } else { "incomplete" }
+      let status = if brackets_balanced(code) {
+        "complete"
+      } else {
+        "incomplete"
+      }
       reply(
         k,
         peer,
@@ -338,8 +372,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
       let (_start, _end, token) = token_at(code, cursor)
       let doc = lookup_doc(token)
       let data = match doc {
-        Some(text) =>
-          @jupyter.obj([("text/plain", Json::string(text))])
+        Some(text) => @jupyter.obj([("text/plain", Json::string(text))])
         None => @jupyter.obj([])
       }
       reply(
@@ -389,7 +422,11 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
       // Do not orphan a running cell's process tree (on Unix the child is
       // spawned detached and would outlive us).
       if k.cell_pid > 0 {
-        log_kernel(k, LogLevel::Warn, "shutdown: killing running cell (pid \{k.cell_pid})")
+        log_kernel(
+          k,
+          LogLevel::Warn,
+          "shutdown: killing running cell (pid \{k.cell_pid})",
+        )
         @nodeff.kill_tree(k.cell_pid)
         k.cell_pid = -1
       }
@@ -421,7 +458,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
-const KERNEL_VERSION : String = "0.1.6"
+const KERNEL_VERSION : String = "0.1.7"
 
 ///|
 /// Return the last `keep` elements of `xs`.
@@ -452,7 +489,7 @@ fn history_json(entries : Array[(Int, String)]) -> Json {
 
 ///|
 /// Read a boolean field out of a JSON object, defaulting to `default`.
-fn jbool_field(j : Json, key : String, default~ : Bool = false) -> Bool {
+fn jbool_field(j : Json, key : String, default? : Bool = false) -> Bool {
   match j {
     Json::Object(fields) =>
       match fields.get(key) {
@@ -482,7 +519,11 @@ fn lines_json(s : String) -> Json {
 /// The identifier token surrounding `cursor_pos` (both directions), for
 /// inspect requests.
 fn token_at(code : String, cursor_pos : Int) -> (Int, Int, String) {
-  let clamped = if cursor_pos > code.length() { code.length() } else { cursor_pos }
+  let clamped = if cursor_pos > code.length() {
+    code.length()
+  } else {
+    cursor_pos
+  }
   let mut start = clamped
   while start > 0 && is_ident_char(code[start - 1]) {
     start = start - 1
@@ -504,7 +545,9 @@ fn lookup_doc(word : String) -> String? {
         "println(value) — print a value to standard output followed by a newline.",
       )
     "print" =>
-      Some("print(value) — print a value to standard output without a trailing newline.")
+      Some(
+        "print(value) — print a value to standard output without a trailing newline.",
+      )
     "let" =>
       Some(
         "let binds an immutable value; use `let mut` for a mutable binding.\n\nlet x = 1\nlet mut y = 2",
@@ -518,15 +561,21 @@ fn lookup_doc(word : String) -> String? {
         "match destructures a value by pattern.\n\nmatch x {\n  0 => \"zero\"\n  _ => \"other\"\n}",
       )
     "while" =>
-      Some("while repeats a block while its condition holds.\n\nwhile i < 10 {\n  i = i + 1\n}")
+      Some(
+        "while repeats a block while its condition holds.\n\nwhile i < 10 {\n  i = i + 1\n}",
+      )
     "for" =>
-      Some("for iterates over ranges or collections.\n\nfor i in 0..<5 {\n  println(i)\n}")
+      Some(
+        "for iterates over ranges or collections.\n\nfor i in 0..<5 {\n  println(i)\n}",
+      )
     "if" =>
       Some(
         "if evaluates one of two branches by condition. It is also an expression:\n\nlet m = if a > b { a } else { b }",
       )
     "struct" =>
-      Some("struct defines a record type.\n\nstruct Point {\n  x : Int\n  y : Int\n}")
+      Some(
+        "struct defines a record type.\n\nstruct Point {\n  x : Int\n  y : Int\n}",
+      )
     "enum" =>
       Some(
         "enum defines a sum type.\n\nenum Shape {\n  Circle(Double)\n  Square(Double)\n}",
@@ -534,7 +583,10 @@ fn lookup_doc(word : String) -> String? {
     "loop" =>
       Some("loop repeats until a `break` inside its body.\n\nloop {\n  ...\n}")
     "to_string" => Some("to_string() renders a value as a String.")
-    "length" => Some("length() returns the number of elements (for strings: UTF-16 code units).")
+    "length" =>
+      Some(
+        "length() returns the number of elements (for strings: UTF-16 code units).",
+      )
     _ => None
   }
 }
@@ -576,7 +628,8 @@ fn brackets_balanced(code : String) -> Bool {
     }
     i = i + 1
   }
-  paren == 0 && brack == 0 && brace == 0
+  // an unterminated string literal means the cell continues on the next line
+  paren == 0 && brack == 0 && brace == 0 && !in_str
 }
 
 ///|
@@ -649,7 +702,7 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
       k.history = drop_first(k.history, k.history.length() - 100)
     }
   }
-  
+
   publish(
     k,
     "status",
@@ -666,6 +719,10 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 
   // Kernel magic commands (MoonBit never starts a top-level statement
   // with '%'), handled synchronously without spawning `moon run`.
+  let timed = match magic_name(code) {
+    Some("time") => true
+    _ => false
+  }
   let magic = parse_magic(k, code)
   match magic {
     Some(output) => {
@@ -694,12 +751,48 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
     None => ()
   }
 
-  run_cell(k, code, fn(ok, ename, evalue, traceback, duration_ms) {
+  // %time <code>: run the remainder as normal code, then stream the
+  // wall time on iopub (the reply metadata also carries duration_ms).
+  let run_code = if timed { magic_args(code) } else { code }
+  if timed && run_code == "" {
+    publish_stream(k, "stderr", "usage: %time <moonbit code>")
+    reply(
+      k,
+      peer,
+      "execute_reply",
+      @jupyter.obj([
+        ("status", Json::string("ok")),
+        ("execution_count", Json::number(count.to_double())),
+        ("payload", Json::array([])),
+        ("user_expressions", @jupyter.obj([])),
+        ("metadata", @jupyter.obj([])),
+      ]),
+      msg,
+    )
+    publish(
+      k,
+      "status",
+      @jupyter.obj([("execution_state", Json::string("idle"))]),
+    )
+    return
+  }
+
+  run_cell(k, run_code, fn(ok, ename, evalue, traceback, duration_ms) {
+    if timed {
+      publish_stream(k, "stdout", "Wall time: \{duration_ms} ms")
+    }
     let meta = @jupyter.obj([
-      ("moonjupyter", @jupyter.obj([("duration_ms", Json::number(duration_ms.to_double()))])),
+      (
+        "moonjupyter",
+        @jupyter.obj([("duration_ms", Json::number(duration_ms.to_double()))]),
+      ),
     ])
     if ok {
-      log_kernel(k, LogLevel::Info, "cell \{count} executed successfully in \{duration_ms}ms")
+      log_kernel(
+        k,
+        LogLevel::Info,
+        "cell \{count} executed successfully in \{duration_ms}ms",
+      )
       reply(
         k,
         peer,
@@ -714,7 +807,11 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
         msg,
       )
     } else {
-      log_kernel(k, LogLevel::Error, "cell \{count} failed: \{ename} - \{evalue}")
+      log_kernel(
+        k,
+        LogLevel::Error,
+        "cell \{count} failed: \{ename} - \{evalue}",
+      )
       reply(
         k,
         peer,
@@ -741,10 +838,9 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// MoonBit keywords and common builtins offered by TAB completion.
 let completion_candidates : Array[String] = [
-  "fn", "let", "mut", "if", "else", "match", "while", "for", "in", "break",
-  "continue", "return", "struct", "enum", "trait", "impl", "pub", "priv",
-  "true", "false", "print", "println", "to_string", "to_int", "to_double",
-  "length", "abs", "min", "max", "sqrt",
+  "fn", "let", "mut", "if", "else", "match", "while", "for", "in", "break", "continue",
+  "return", "struct", "enum", "trait", "impl", "pub", "priv", "true", "false", "print",
+  "println", "to_string", "to_int", "to_double", "length", "abs", "min", "max", "sqrt",
 ]
 
 ///|
@@ -766,10 +862,7 @@ fn is_digit_char(c : UInt16) -> Bool {
 /// TAB completion: extract the identifier ending at `cursor_pos` and suggest
 /// keywords plus identifiers that appear anywhere in the cell. Returns
 /// (cursor_start, cursor_end, matches).
-fn complete_token(
-  code : String,
-  cursor_pos : Int,
-) -> (Int, Int, Array[String]) {
+fn complete_token(code : String, cursor_pos : Int) -> (Int, Int, Array[String]) {
   let end = if cursor_pos > code.length() { code.length() } else { cursor_pos }
   let mut start = end
   while start > 0 && is_ident_char(code[start - 1]) {
@@ -848,11 +941,27 @@ fn run_cell(
   on_done : (Bool, String, String, String, Int) -> Unit,
 ) -> Unit {
   let dir = @nodeff.mkdtemp()
-  @nodeff.write_text(
-    dir + "/moon.mod.json",
-    "{\"name\": \"cell/exec\", \"version\": \"0.1.0\"}",
-  )
-  @nodeff.write_text(dir + "/src/main/moon.pkg.json", "{\"is-main\": true}")
+  // Modules declared with %use become moon.mod imports ("module@version");
+  // their package paths are imported by the generated moon.pkg. Both use
+  // the current non-JSON config formats (moon.mod.json is deprecated).
+  let mut mod_text = "name = \"cell/exec\"\n\nversion = \"0.1.0\"\n"
+  if k.cell_deps.length() > 0 {
+    let imports = k.cell_deps
+      .map(fn(dep) {
+        let (m, v) = dep
+        "  \"" + m + "@" + v + "\","
+      })
+      .join("\n")
+    mod_text = mod_text + "import {\n" + imports + "\n}"
+  }
+  @nodeff.write_text(dir + "/moon.mod", mod_text)
+  let mut pkg_text = ""
+  if k.cell_imports.length() > 0 {
+    let imports = k.cell_imports.map(fn(p) { "  \"" + p + "\"," }).join("\n")
+    pkg_text = pkg_text + "import {\n" + imports + "\n}\n\n"
+  }
+  pkg_text = pkg_text + "options(\n  \"is-main\": true,\n)"
+  @nodeff.write_text(dir + "/src/main/moon.pkg", pkg_text)
   let src = if contains_main_fn(code) {
     code
   } else {
@@ -883,7 +992,9 @@ fn run_cell(
       if k.cell_interrupted {
         k.metrics.error_count = k.metrics.error_count + 1
         log_kernel(k, LogLevel::Warn, "cell \{k.exec_count} interrupted")
-        on_done(false, "KeyboardInterrupt", "execution interrupted", "", duration_ms)
+        on_done(
+          false, "KeyboardInterrupt", "execution interrupted", "", duration_ms,
+        )
       } else if exit_code == 0 {
         on_done(true, "", "", "", duration_ms)
       } else {
@@ -979,13 +1090,15 @@ fn publish_stream(k : Kernel, name : String, text : String) -> Unit {
 }
 
 ///|
-/// Kernel magic commands: cells starting with '%' are interpreted by the
-/// kernel itself instead of being compiled with `moon run` (MoonBit never
-/// begins a top-level statement with '%').
-fn parse_magic(k : Kernel, code : String) -> String? {
-  // skip leading whitespace
+fn is_ws(c : UInt16) -> Bool {
+  c == 32 || c == 9 || c == 10 || c == 13
+}
+
+///|
+/// The magic name of a cell (without '%'), or None for regular code.
+fn magic_name(code : String) -> String? {
   let mut i = 0
-  while i < code.length() && (code[i] == 32 || code[i] == 9 || code[i] == 10) {
+  while i < code.length() && is_ws(code[i]) {
     i = i + 1
   }
   if i >= code.length() || code[i] != 37 {
@@ -995,14 +1108,76 @@ fn parse_magic(k : Kernel, code : String) -> String? {
   while end < code.length() && is_ident_char(code[end]) {
     end = end + 1
   }
-  let name = @bx.sslice(code, i + 1, end)
+  Some(@bx.sslice(code, i + 1, end))
+}
+
+///|
+/// The text after the magic name (leading whitespace stripped); for a
+/// non-magic cell this is the code unchanged.
+fn magic_args(code : String) -> String {
+  let mut i = 0
+  while i < code.length() && is_ws(code[i]) {
+    i = i + 1
+  }
+  if i < code.length() && code[i] == 37 {
+    i = i + 1
+    while i < code.length() && is_ident_char(code[i]) {
+      i = i + 1
+    }
+    while i < code.length() && is_ws(code[i]) {
+      i = i + 1
+    }
+  }
+  @bx.sslice(code, i, code.length())
+}
+
+///|
+fn arr_contains(arr : Array[String], s : String) -> Bool {
+  for x in arr {
+    if x == s {
+      return true
+    }
+  }
+  false
+}
+
+///|
+/// Package paths, module names and semver versions may contain letters,
+/// digits, '_', '-', '/', '.'.
+fn valid_pkg_name(s : String) -> Bool {
+  if s == "" {
+    return false
+  }
+  for i = 0; i < s.length(); i = i + 1 {
+    let c = s[i]
+    if !is_ident_char(c) && c != 47 && c != 45 && c != 46 {
+      return false
+    }
+  }
+  true
+}
+
+///|
+/// Kernel magic commands: cells starting with '%' are interpreted by the
+/// kernel itself instead of being compiled with `moon run` (MoonBit never
+/// begins a top-level statement with '%'). Returns the text to stream
+/// back, or None when the cell should run as MoonBit code (%time falls
+/// through here on purpose).
+fn parse_magic(k : Kernel, code : String) -> String? {
+  let name = match magic_name(code) {
+    Some(n) => n
+    None => return None
+  }
   match name {
     "help" =>
       Some(
         "moonjupyter magic commands:\n" +
-        "  %help     — show this list\n" +
-        "  %history  — show the last executed cells\n" +
-        "  %stats    — show kernel performance statistics",
+        "  %help              — show this list\n" +
+        "  %history           — show the last executed cells\n" +
+        "  %stats             — show kernel performance statistics\n" +
+        "  %time <code>       — run code and report its wall time\n" +
+        "  %use [<module>]    — import an external package into cells\n" +
+        "  %reset             — clear history, counters and metrics",
       )
     "history" => {
       let mut out = "recent cells:\n"
@@ -1027,6 +1202,73 @@ fn parse_magic(k : Kernel, code : String) -> String? {
       }
       Some(out)
     }
+    "reset" => {
+      k.history = []
+      k.exec_count = 0
+      k.metrics.message_count = 0
+      k.metrics.error_count = 0
+      k.metrics.execution_time = Map([])
+      k.metrics.throughput = Map([])
+      Some("kernel state cleared: history, execution counter and metrics")
+    }
+    "use" => {
+      let arg = magic_args(code)
+      if arg == "" {
+        let mut out = "active extra packages:\n"
+        for i = 0; i < k.cell_imports.length(); i = i + 1 {
+          let (m, v) = k.cell_deps[i]
+          out = out + "  \{k.cell_imports[i]} (\{m}@\{v})\n"
+        }
+        if k.cell_imports.length() == 0 {
+          out = out + "  (none — usage: %use <package-path>@<version>)\n"
+        }
+        return Some(out)
+      }
+      // "<path>@<version>": moon.mod.json requires a concrete version.
+      let mut at = -1
+      for i = 0; i < arg.length(); i = i + 1 {
+        if arg[i] == 64 {
+          at = i // '@'
+          break
+        }
+      }
+      if at < 0 {
+        return Some(
+          "missing version — moon requires one: %use <package-path>@<version>\n  e.g. %use bobzhang/loop_invariants_string@0.16.0",
+        )
+      }
+      let path = @bx.sslice(arg, 0, at)
+      let version = @bx.sslice(arg, at + 1, arg.length())
+      if !valid_pkg_name(path) || !valid_pkg_name(version) {
+        return Some("invalid package name or version: \{arg}")
+      }
+      // dep module = first two path segments ("user/pkg" from "user/pkg/sub")
+      let segs = path.split("/")
+        |> Iter::to_array
+        |> Array::map(fn(v) { v.to_owned() })
+      let dep_mod = if segs.length() >= 2 {
+        "\{segs[0]}/\{segs[1]}"
+      } else {
+        path
+      }
+      // replace an existing entry for the module, else append
+      let updated : Array[(String, String)] = []
+      for d in k.cell_deps {
+        let (m, _v) = d
+        if m != dep_mod {
+          updated.push(d)
+        }
+      }
+      updated.push((dep_mod, version))
+      k.cell_deps = updated
+      if !arr_contains(k.cell_imports, path) {
+        k.cell_imports.push(path)
+      }
+      Some(
+        "added module \{dep_mod}@\{version} (import \{path}) — takes effect on the next cell",
+      )
+    }
+    "time" => None // handled by handle_execute: runs the rest as code
     _ => Some("unknown magic command %\{name} — try %help")
   }
 }
@@ -1128,7 +1370,11 @@ fn cleanup_inactive_peers(k : Kernel) -> Unit {
   }
 
   // Log maintenance activity
-  log_kernel(k, LogLevel::Debug, "cleanup: checked \{k.peer_stats.length()} peers")
+  log_kernel(
+    k,
+    LogLevel::Debug,
+    "cleanup: checked \{k.peer_stats.length()} peers",
+  )
 }
 
 ///|
@@ -1163,7 +1409,9 @@ fn get_performance_stats(k : Kernel) -> Json {
     current_throughput = current_throughput + rate
   }
   let error_rate = if k.metrics.message_count > 0 {
-    (k.metrics.error_count.to_double() / k.metrics.message_count.to_double()) * 100.0
+    k.metrics.error_count.to_double() /
+    k.metrics.message_count.to_double() *
+    100.0
   } else {
     0.0
   }
@@ -1242,6 +1490,7 @@ fn publish(k : Kernel, msg_type : String, content : Json) -> Unit {
     }
   }
 }
+
 ///|
 /// ---- tests ----
 test "completion suggests keywords and cell identifiers" {
@@ -1302,6 +1551,8 @@ test "brackets balanced heuristic" {
   assert_true(brackets_balanced("let s = \"{[( \"\nprintln(s)"))
   // escaped quote inside a string
   assert_true(brackets_balanced("println(\"a \\\" ( \")"))
+  // unclosed string with no brackets is still incomplete
+  assert_false(brackets_balanced("let s = \"abc"))
 }
 
 ///|
@@ -1368,4 +1619,40 @@ test "lookup_doc finds known builtins" {
   assert_true(lookup_doc("println") is Some(_))
   assert_true(lookup_doc("match") is Some(_))
   assert_true(lookup_doc("definitely_not_a_thing") is None)
+}
+
+///|
+test "valid_pkg_name guards the generated JSON" {
+  assert_true(valid_pkg_name("moonbitlang/core/crypto"))
+  assert_true(valid_pkg_name("gmlewis/spinner"))
+  assert_true(valid_pkg_name("user/pkg-x_1"))
+  assert_false(valid_pkg_name(""))
+  assert_false(valid_pkg_name("user/pkg\"")) // would break out of the JSON string
+  assert_false(valid_pkg_name("user/pkg; rm -rf"))
+  assert_false(valid_pkg_name("has space"))
+}
+
+///|
+test "magic_args strips the magic prefix" {
+  assert_eq(magic_args("%time println(1)"), "println(1)")
+  assert_eq(magic_args("  %time   let x = 1"), "let x = 1")
+  assert_eq(magic_args("%use"), "")
+  assert_eq(magic_args("println(1)"), "println(1)")
+}
+
+///|
+test "magic_name extracts the command" {
+  match magic_name("  %help") {
+    Some(n) => assert_eq(n, "help")
+    None => assert_true(false)
+  }
+  match magic_name("let x = 1") {
+    Some(_) => assert_true(false)
+    None => assert_true(true)
+  }
+  // '%' only counts at the start of the cell, not mid-expression
+  match magic_name("let pct = 50 % 3") {
+    Some(_) => assert_true(false)
+    None => assert_true(true)
+  }
 }

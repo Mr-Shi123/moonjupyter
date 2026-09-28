@@ -24,10 +24,14 @@ Notebook 中交互式运行 MoonBit 代码。项目同时包含一个可独立�
 - **五个通道**：shell/control/stdin（ROUTER）、iopub（PUB）、hb（REP 心跳回显）
 - **cell 执行**：临时项目 + `moon run`，stdout/stderr 按行流式回传 iopub，
   成功/错误分别产出 execute_reply，metadata 携带真实执行耗时
-- **交互体验**：TAB 补全（关键字 + 当前 cell 标识符）、`is_complete` 括号配对
-  启发式（未闭合的 cell 不会误执行）、执行历史（最近 100 个 cell）
+- **交互体验**：TAB 补全（关键字 + 当前 cell 标识符）、`is_complete` 括号/字符串
+  配对启发式（未闭合的 cell 不会误执行）、执行历史（最近 100 个 cell）、
+  `inspect_request` 内置文档（Shift+Tab）
+- **魔法命令**：`%help`、`%history`、`%stats`、`%time <code>`（报告执行耗时）、
+  `%use <pkg>@<version>`（让 cell 引用 mooncakes 外部包）、`%reset`（清空状态）
 - **健壮性**：cell 60s 超时强杀（杀进程树，覆盖死循环）、interrupt_request
-  真正中断当前 cell、shutdown 回显 restart 标志、消息帧 16 MiB 上限
+  真正中断当前 cell、shutdown 回显 restart 标志并清理运行中的 cell、
+  消息帧 16 MiB 上限、ZMTP 层 64 MiB 帧上限
 - 跨平台：通过 Node.js 传输层运行（Windows/macOS/Linux）✨
 
 ## Quick Start
@@ -120,6 +124,10 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 ## Changelog
 
+- **v0.1.7** — magic commands `%time` / `%use <pkg>@<ver>` / `%reset`;
+  `%use` lets cells import mooncakes packages (generates current moon.mod /
+  moon.pkg configs, replacing the deprecated JSON files); is_complete now
+  treats an unterminated string literal as incomplete
 - **v0.1.6** — ZMTP 层帧大小上限与会话关闭短路（协议级 DoS 加固），execute
   尊重 store_history，execute_reply metadata 携带真实耗时，断连清理 peer
   计数，README 功能文档更新

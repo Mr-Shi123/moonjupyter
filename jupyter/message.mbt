@@ -273,15 +273,7 @@ pub fn parse_connection(s : String) -> Result[ConnectionInfo, String] {
     Some(Json::Number(d, ..)) => d.to_int()
     _ => return miss("hb_port")
   }
-  Ok({
-    ip,
-    shell_port,
-    control_port,
-    stdin_port,
-    iopub_port,
-    hb_port,
-    key,
-  })
+  Ok({ ip, shell_port, control_port, stdin_port, iopub_port, hb_port, key, })
 }
 
 ///|
