@@ -14,6 +14,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+          cache: 'npm'
+      - name: Set Node.js path
+        run: echo "/usr/local/bin" >> $GITHUB_PATH
 
       - name: Install MoonBit toolchain (v0.10.4)
         run: |
@@ -28,4 +31,4 @@ jobs:
         run: moon check --target js
 
       - name: moon test (js target)
-        run: moon test --target js --reporter spec
+        run: moon test --target js
