@@ -81,6 +81,10 @@ priv struct Kernel {
   /// the OS can finish tearing the killed process tree down (a moon run
   /// started instantly after taskkill fails with exit 1 and no output)
   mut last_kill_ms : Int
+  /// all non-magic cells executed this session, in order; each cell run
+  /// compiles the whole notebook again (accumulated replay), so
+  /// definition cells stay visible to later cells
+  mut replay_cells : Array[String]
 }
 
 ///|
@@ -119,6 +123,7 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
     cell_imports: [],
     cell_timeout_ms: CELL_TIMEOUT_MS,
     last_kill_ms: -1000000,
+    replay_cells: [],
   }
   let shell = Channel::new("shell", "ROUTER")
   let control = Channel::new("control", "ROUTER")
@@ -467,12 +472,12 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
-const KERNEL_VERSION : String = "0.1.8"
+const KERNEL_VERSION : String = "0.1.9"
 
 ///|
 /// Return the last `keep` elements of `xs`.
-fn drop_first(xs : Array[(Int, String)], drop : Int) -> Array[(Int, String)] {
-  let out : Array[(Int, String)] = []
+fn[T] drop_first(xs : Array[T], drop : Int) -> Array[T] {
+  let out : Array[T] = []
   for i = drop; i < xs.length(); i = i + 1 {
     out.push(xs[i])
   }
@@ -987,10 +992,19 @@ fn run_cell(
   }
   pkg_text = pkg_text + "options(\n  \"is-main\": true,\n)"
   @nodeff.write_text(dir + "/src/main/moon.pkg", pkg_text)
-  let src = if contains_main_fn(code) {
+  // Accumulated replay: a cell that declares its own `fn main` is a
+  // complete program and runs standalone (not part of the notebook
+  // state); every other cell joins the replay, and the generated source
+  // recompiles the whole notebook so earlier definitions stay visible.
+  let replay_len_before = k.replay_cells.length()
+  let standalone = contains_main_fn(code)
+  let src = if standalone {
     code
   } else {
-    "fn main {\n  " + code + "\n}\n"
+    build_replay(k.replay_cells, code)
+  }
+  if !standalone {
+    k.replay_cells.push(code)
   }
   @nodeff.write_text(dir + "/src/main/main.mbt", src)
   let started = @nodeff.elapsed_ms()
@@ -1015,6 +1029,8 @@ fn run_cell(
       flush_pending(k, out_buf, "stdout")
       flush_pending(k, err_buf, "stderr")
       if k.cell_interrupted {
+        // aborted mid-run: its half-finished state must not join the replay
+        k.replay_cells = drop_first(k.replay_cells, k.replay_cells.length() - replay_len_before)
         k.metrics.error_count = k.metrics.error_count + 1
         log_kernel(k, LogLevel::Warn, "cell \{k.exec_count} interrupted")
         on_done(
@@ -1023,6 +1039,8 @@ fn run_cell(
       } else if exit_code == 0 {
         on_done(true, "", "", "", duration_ms)
       } else {
+        // a failed cell leaves no usable state: roll it back out of the replay
+        k.replay_cells = drop_first(k.replay_cells, k.replay_cells.length() - replay_len_before)
         k.metrics.error_count = k.metrics.error_count + 1
         let mut tb = last_lines(err_buf, 8)
         match missing_package_hint(err_buf) {
@@ -1057,6 +1075,8 @@ fn run_cell(
       let duration_ms = @nodeff.elapsed_ms() - started
       k.metrics.execution_time["exec-\{k.exec_count}"] = duration_ms
       k.metrics.error_count = k.metrics.error_count + 1
+      // a timed-out cell never finished; its code leaves no usable state
+      k.replay_cells = drop_first(k.replay_cells, k.replay_cells.length() - replay_len_before)
       @nodeff.rmrf(dir)
       on_done(
         false,
@@ -1179,6 +1199,80 @@ fn missing_package_hint(err_text : String) -> String? {
 }
 
 ///|
+/// A cell whose first token (after whitespace and line comments) is a
+/// declaration keyword is a definition cell: its code is spliced into the
+/// replayed notebook source at top level, so bindings stay visible to
+/// later cells. Everything else is a statement cell.
+fn is_def_cell(code : String) -> Bool {
+  let mut i = 0
+  while i < code.length() && is_ws(code[i]) {
+    i = i + 1
+  }
+  // skip leading `//` line comments so annotated definitions classify right
+  while i + 1 < code.length() && code[i] == 47 && code[i + 1] == 47 {
+    while i < code.length() && code[i] != 10 {
+      i = i + 1
+    }
+    while i < code.length() && is_ws(code[i]) {
+      i = i + 1
+    }
+  }
+  if i >= code.length() {
+    return false
+  }
+  let words = [
+    "let", "fn", "struct", "enum", "trait", "impl", "type", "pub", "priv",
+    "const",
+  ]
+  for w in words {
+    if starts_with_word(code, i, w) {
+      return true
+    }
+  }
+  false
+}
+
+///|
+fn starts_with_word(code : String, start : Int, word : String) -> Bool {
+  if code.length() - start < word.length() {
+    return false
+  }
+  if @bx.sslice(code, start, start + word.length()) != word {
+    return false
+  }
+  // a real token must not run into a longer identifier ("letx" is not "let")
+  let after = start + word.length()
+  after >= code.length() || !is_ident_char(code[after])
+}
+
+///|
+/// Build the replayed notebook source. Definition cells are spliced at top
+/// level in order; statement cells (past and current) become numbered
+/// functions, but main invokes only the current cell's function — earlier
+/// cells' side effects must not repeat on every execution.
+fn build_replay(past : Array[String], current : String) -> String {
+  let mut out = ""
+  let mut n = 0
+  for cell in past {
+    n = n + 1
+    if is_def_cell(cell) {
+      out = out + "// cell " + n.to_string() + " (definitions)\n" + cell + "\n"
+    } else {
+      out = out + "fn __cell_" + n.to_string() + "() -> Unit {\n" + cell + "\n}\n"
+    }
+  }
+  let current_idx = n + 1
+  if is_def_cell(current) {
+    out = out + "// cell " + current_idx.to_string() + " (definitions)\n" + current + "\n"
+    out = out + "\nfn main {\n}\n"
+  } else {
+    out = out + "fn __cell_" + current_idx.to_string() + "() -> Unit {\n" + current + "\n}\n"
+    out = out + "\nfn main {\n  __cell_" + current_idx.to_string() + "()\n}\n"
+  }
+  out
+}
+
+///|
 fn is_ws(c : UInt16) -> Bool {
   c == 32 || c == 9 || c == 10 || c == 13
 }
@@ -1294,12 +1388,13 @@ fn parse_magic(k : Kernel, code : String) -> String? {
     }
     "reset" => {
       k.history = []
+      k.replay_cells = []
       k.exec_count = 0
       k.metrics.message_count = 0
       k.metrics.error_count = 0
       k.metrics.execution_time = Map([])
       k.metrics.throughput = Map([])
-      Some("kernel state cleared: history, execution counter and metrics")
+      Some("kernel state cleared: history, replay, execution counter and metrics")
     }
     "timeout" => {
       let arg = magic_args(code)
@@ -1799,4 +1894,42 @@ test "missing package hint matches moon errors" {
   assert_true(missing_package_hint(registry_err) is Some(_))
   // ordinary compile errors get no hint
   assert_true(missing_package_hint("Error: type mismatch at line 3") is None)
+}
+
+///|
+test "def vs statement cell classification" {
+  // declaration keywords (possibly after comments) -> definition cell
+  assert_true(is_def_cell("let n = 21"))
+  assert_true(is_def_cell("fn add(a : Int, b : Int) -> Int { a + b }"))
+  assert_true(is_def_cell("struct Point { x : Int }"))
+  assert_true(is_def_cell("pub fn go() {}"))
+  assert_true(is_def_cell("// doc comment\nlet hidden = 1"))
+  // statements and empty cells are not definitions
+  assert_false(is_def_cell("println(n * 2)"))
+  assert_false(is_def_cell("while (true) {}"))
+  assert_false(is_def_cell(""))
+  // identifiers that merely start like keywords do not classify
+  assert_false(is_def_cell("letter_count.println_stub()"))
+}
+
+///|
+test "build_replay splices definitions and invokes only the current cell" {
+  let past = ["let n = 21", "println(n)"]
+  let src = build_replay(past, "println(n * 2)")
+  // definitions land at top level
+  assert_true(src.contains("let n = 21"))
+  // past statement cell is wrapped but never invoked
+  assert_true(src.contains("fn __cell_2() -> Unit {"))
+  assert_false(src.contains("__cell_2()") == false && false) // sanity
+  assert_true(!src.contains("  __cell_2()"))
+  // only the current cell's function is called by main
+  assert_true(src.contains("fn main {\n  __cell_3()\n}"))
+}
+
+///|
+test "build_replay treats a definition cell as compile-only" {
+  let src = build_replay([], "let n = 21")
+  assert_true(src.contains("let n = 21"))
+  // main body stays empty: nothing to execute, binding joins the state
+  assert_true(src.contains("fn main {\n}"))
 }

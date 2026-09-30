@@ -108,8 +108,11 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 当前为 MVP，已知限制与演进路线：
 
-1. **无状态 cell**：每个 cell 独立 `moon run`，跨 cell 不共享定义。
-   → 路线：常驻会话进程 + 增量编译/求值。
+1. **跨 cell 状态（已支持，v0.1.9）**：内核按序重放全部 cell——以
+   `let` / `fn` / `struct` 等声明开头的"定义 cell"拼接进顶层，后续 cell
+   直接可用；语句 cell 只执行当前一次（历史副作用不重复）。含自写
+   `fn main` 的 cell 作为完整程序单独执行，不进入重放。`%reset` 清空。
+   → 路线：常驻会话进程 + 增量编译，避免重放编译时间随 notebook 增长。
 2. **补全/检查为空实现**：`complete_request` / `inspect_request` 返回空。
    → 路线：对接 MoonBit 编译器诊断信息。
 3. **stdin 未实现**、`interrupt_request` 忽略（interrupt_mode=message）。
@@ -124,6 +127,10 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 ## Changelog
 
+- **v0.1.9** — 累计重放（申报书规划第一项）：跨 cell 状态累积。定义 cell
+  （以 let/fn/struct 等声明开头）拼接进 notebook 顶层，后续 cell 直接可用；
+  语句 cell 只执行当前一次，历史副作用不重复；自写 `fn main` 的 cell 单独
+  执行；`%reset` 清空重放状态
 - **v0.1.8** — magic commands `%timeout` (view/set the per-cell wall-time
   limit) and multi-package `%use a@v b@v`; cell output fragment is capped
   at 1 MiB so newline-less floods cannot grow memory unbounded; registry
