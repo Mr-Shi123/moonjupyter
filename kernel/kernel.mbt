@@ -476,13 +476,26 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
-const KERNEL_VERSION : String = "0.2.0"
+const KERNEL_VERSION : String = "0.2.1"
 
 ///|
 /// Return the last `keep` elements of `xs`.
 fn[T] drop_first(xs : Array[T], drop : Int) -> Array[T] {
   let out : Array[T] = []
   for i = drop; i < xs.length(); i = i + 1 {
+    out.push(xs[i])
+  }
+  out
+}
+
+///|
+/// Keep the first `keep` elements of `xs` (rollback counterpart of
+/// drop_first: replay must retain its original prefix and lose the
+/// entries appended by a failed cell).
+fn[T] keep_first(xs : Array[T], keep : Int) -> Array[T] {
+  let out : Array[T] = []
+  let n = if keep < xs.length() { keep } else { xs.length() }
+  for i = 0; i < n; i = i + 1 {
     out.push(xs[i])
   }
   out
@@ -715,7 +728,7 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
   }
   k.parent = Some(msg.header)
 
-  let code = @jupyter.jstr_field(msg.content, "code")
+  let mut code = @jupyter.jstr_field(msg.content, "code")
   log_kernel(k, LogLevel::Info, "executing cell \{count}: \{code}")
 
   // Keep the last 100 cells for history_request.
@@ -759,6 +772,18 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
       return
     }
     _ => ()
+  }
+  // notebook-style value display: `= expr` prints the value (Out-style).
+  // The rewrite happens before replay so history and the notebook state
+  // both contain the honest println form.
+  match value_display_kind(code) {
+    Empty => {
+      publish_stream(k, "stdout", "usage: = <expression> prints its value")
+      finish_magic(k, peer, msg, count)
+      return
+    }
+    Expr(expr) => code = "println(\{expr})"
+    NotDisplay => ()
   }
   let magic = parse_magic(k, code)
   match magic {
@@ -1027,23 +1052,69 @@ fn run_cell(
   k.cell_interrupted = false
   let mut out_buf = ""
   let mut err_buf = ""
+  // full stderr accumulation for diagnostics (err_buf only holds the
+  // trailing partial line; complete lines are streamed to iopub)
+  let mut err_text = ""
+  // A moon run occasionally exits 1 within ~100ms with no output at all
+  // (see the retry branch below); the exit logic is re-entrant through
+  // exit_ref so the failure can be retried once transparently.
+  let retried : Ref[Bool] = Ref(false)
+  let exit_ref : Ref[(Int) -> Unit] = Ref(fn(_code) { () })
   @nodeff.spawn_process(
     dir,
     "moon run src/main",
     fn(chunk) { out_buf = stream_lines(k, out_buf + chunk, "stdout") },
-    fn(chunk) { err_buf = stream_lines(k, err_buf + chunk, "stderr") },
-    fn(exit_code) {
+    fn(chunk) {
+      err_text = err_text + chunk
+      err_buf = stream_lines(k, err_buf + chunk, "stderr")
+    },
+    fn(exit_code) { (exit_ref.val)(exit_code) },
+    fn(pid) { k.cell_pid = pid },
+  )
+  exit_ref.val = fn(exit_code) {
       if k.cell_pid < 0 {
         return // aborted; timeout/interrupt path already reported
       }
       k.cell_pid = -1
       let duration_ms = @nodeff.elapsed_ms() - started
+      // transient silent failure: exit != 0, fast, and the process wrote
+      // nothing at all — wait a beat and run the exact same cell again
+      if exit_code != 0 &&
+        !k.cell_interrupted &&
+        duration_ms < 600 &&
+        out_buf == "" && err_text == "" &&
+        err_buf == "" &&
+        !retried.val {
+        retried.val = true
+        log_kernel(
+          k,
+          LogLevel::Warn,
+          "transient silent moon run failure — retrying once",
+        )
+        out_buf = ""
+        err_buf = ""
+        err_text = ""
+        @nodeff.later(400, fn() {
+          @nodeff.spawn_process(
+            dir,
+            "moon run src/main",
+            fn(chunk) { out_buf = stream_lines(k, out_buf + chunk, "stdout") },
+            fn(chunk) {
+      err_text = err_text + chunk
+      err_buf = stream_lines(k, err_buf + chunk, "stderr")
+    },
+            fn(code) { (exit_ref.val)(code) },
+            fn(pid) { k.cell_pid = pid },
+          )
+        })
+        return
+      }
       k.metrics.execution_time["exec-\{k.exec_count}"] = duration_ms
       flush_pending(k, out_buf, "stdout")
       flush_pending(k, err_buf, "stderr")
       if k.cell_interrupted {
         // aborted mid-run: its half-finished state must not join the replay
-        k.replay_cells = drop_first(k.replay_cells, k.replay_cells.length() - replay_len_before)
+        k.replay_cells = keep_first(k.replay_cells, replay_len_before)
         k.metrics.error_count = k.metrics.error_count + 1
         log_kernel(k, LogLevel::Warn, "cell \{k.exec_count} interrupted")
         on_done(
@@ -1053,11 +1124,11 @@ fn run_cell(
         on_done(true, "", "", [], duration_ms)
       } else {
         // a failed cell leaves no usable state: roll it back out of the replay
-        k.replay_cells = drop_first(k.replay_cells, k.replay_cells.length() - replay_len_before)
+        k.replay_cells = keep_first(k.replay_cells, replay_len_before)
         k.metrics.error_count = k.metrics.error_count + 1
         // structured traceback: clean main.mbt:line:col entries + hint
-        let tb : Array[String] = diagnose(err_buf)
-        match missing_package_hint(err_buf) {
+        let tb : Array[String] = diagnose(err_text)
+        match missing_package_hint(err_text) {
           Some(hint) => {
             log_kernel(k, LogLevel::Info, hint)
             tb.push(hint)
@@ -1073,9 +1144,7 @@ fn run_cell(
         )
       }
       @nodeff.rmrf(dir)
-    },
-    fn(pid) { k.cell_pid = pid },
-  )
+    }
   @nodeff.later(k.cell_timeout_ms, fn() {
     if k.run_seq == my_seq && k.cell_pid > 0 {
       log_kernel(
@@ -1090,7 +1159,7 @@ fn run_cell(
       k.metrics.execution_time["exec-\{k.exec_count}"] = duration_ms
       k.metrics.error_count = k.metrics.error_count + 1
       // a timed-out cell never finished; its code leaves no usable state
-      k.replay_cells = drop_first(k.replay_cells, k.replay_cells.length() - replay_len_before)
+      k.replay_cells = keep_first(k.replay_cells, replay_len_before)
       @nodeff.rmrf(dir)
       on_done(
         false,
@@ -1225,10 +1294,10 @@ fn finish_magic(
 fn trim_ascii(s : String) -> String {
   let mut start = 0
   let mut end = s.length()
-  while start < end && (s[start] == 32 || s[start] == 13 || s[start] == 9) {
+  while start < end && (s[start] == 32 || s[start] == 13 || s[start] == 9 || s[start] == 10) {
     start = start + 1
   }
-  while end > start && (s[end - 1] == 32 || s[end - 1] == 13 || s[end - 1] == 9) {
+  while end > start && (s[end - 1] == 32 || s[end - 1] == 13 || s[end - 1] == 9 || s[end - 1] == 10) {
     end = end - 1
   }
   @bx.sslice(s, start, end)
@@ -1275,17 +1344,26 @@ fn diagnose(err_buf : String) -> Array[String] {
       let parts = t.split("╰──")
         |> Iter::to_array
         |> Array::map(fn(v) { v.to_owned() })
-      let msg = trim_ascii(parts[parts.length() - 1])
-      if loc != "" {
-        out.push("\{loc}: \{msg}")
-        loc = ""
-      } else {
-        out.push(msg)
+      // strip the leading horizontal-dash runes left over from ╰──
+      let mut msg = trim_ascii(parts[parts.length() - 1])
+      while msg.length() > 0 && msg[0] == 9472 {
+        msg = @bx.sslice(msg, 1, msg.length())
+      }
+      let msg = trim_ascii(msg)
+      // keep only messages with real text; the caret alignment row and
+      // the closing frame edge are pure box-drawing noise
+      if has_word_chars(msg) {
+        if loc != "" {
+          out.push("\{loc}: \{msg}")
+          loc = ""
+        } else {
+          out.push(msg)
+        }
       }
     } else if t.contains("Error: [") || t.contains("Warning: [") {
       out.push(t)
-    } else if t.contains("│") {
-      () // box-drawing content lines are visual noise
+    } else if t.contains("│") || t.contains("┬") || t.contains("╯") {
+      () // box-drawing content/caret/closing lines are visual noise
     } else if t != "" {
       // non-boxed output (e.g. linker/runtime messages) passes through
       out.push(t)
@@ -1313,6 +1391,19 @@ fn parse_timeout_ms(arg : String) -> Int? {
   } else {
     None
   }
+}
+
+///|
+/// Whether the string contains at least one ASCII letter or digit (i.e.
+/// actual text rather than box-drawing decoration).
+fn has_word_chars(s : String) -> Bool {
+  for i = 0; i < s.length(); i = i + 1 {
+    let c = s[i]
+    if (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) {
+      return true
+    }
+  }
+  false
 }
 
 ///|
@@ -2075,4 +2166,54 @@ test "diagnose passes through non-boxed error lines" {
   let entries = diagnose("linking failed for unknown reason\n")
   assert_eq(entries.length(), 1)
   assert_eq(entries[0], "linking failed for unknown reason")
+}
+
+///|
+/// Classification of `= ...` value-display cells: the notebook-style way
+/// to show a value without writing println yourself.
+priv enum ValueDisplay {
+  /// not a display cell
+  NotDisplay
+  /// a bare `=` with no expression
+  Empty
+  /// the expression to display
+  Expr(String)
+}
+
+///|
+fn value_display_kind(code : String) -> ValueDisplay {
+  let mut i = 0
+  while i < code.length() && is_ws(code[i]) {
+    i = i + 1
+  }
+  if i >= code.length() || code[i] != 61 {
+    return NotDisplay
+  }
+  // `==` would be a comparison, not the display convention
+  if i + 1 < code.length() && code[i + 1] == 61 {
+    return NotDisplay
+  }
+  let expr = trim_ascii(@bx.sslice(code, i + 1, code.length()))
+  if expr == "" {
+    Empty
+  } else {
+    Expr(expr)
+  }
+}
+
+///|
+test "value display classification" {
+  match value_display_kind("= n * 2") {
+    Expr(e) => assert_eq(e, "n * 2")
+    _ => assert_true(false)
+  }
+  match value_display_kind("  = f(a, b)\n") {
+    Expr(e) => assert_eq(e, "f(a, b)")
+    _ => assert_true(false)
+  }
+  // bare = is a usage case, == and regular code are not display cells
+  assert_true(value_display_kind("=") is Empty)
+  assert_true(value_display_kind("a == b") is NotDisplay)
+  assert_true(value_display_kind("println(1)") is NotDisplay)
+  assert_true(value_display_kind("") is NotDisplay)
 }

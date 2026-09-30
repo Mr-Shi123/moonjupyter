@@ -127,6 +127,12 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 ## Changelog
 
+- **v0.2.1** — notebook-style value display: a cell starting with `=`
+  (`= n * 2`) prints the expression value, Out-style; transient silent
+  moon run failures (exit 1, no output, within 600ms) are now retried
+  once automatically, which also unblocks structured-traceback delivery
+  for affected cells
+
 - **v0.2.0** — 富文本输出与错误诊断结构化（申报书规划第三项）：
   `%html` / `%md` 魔法经 display_data 输出 MIME bundle（Jupyter 渲染
   HTML/Markdown）；编译错误 traceback 结构化为 `main.mbt:行:列: 消息`
