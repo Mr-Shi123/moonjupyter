@@ -127,6 +127,12 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 ## Changelog
 
+- **v0.2.0** — 富文本输出与错误诊断结构化（申报书规划第三项）：
+  `%html` / `%md` 魔法经 display_data 输出 MIME bundle（Jupyter 渲染
+  HTML/Markdown）；编译错误 traceback 结构化为 `main.mbt:行:列: 消息`
+  条目（剥离 box-drawing 框线与临时路径噪音）。asyncff 原生传输
+  （规划第二项）里程碑已就位：`asyncff/` 子项目验证 moonbitlang/async
+  的 TCP 原语在 Windows IOCP 上可用，kernel 迁移待上游 MinGW 兼容修复
 - **v0.1.9** — 累计重放（申报书规划第一项）：跨 cell 状态累积。定义 cell
   （以 let/fn/struct 等声明开头）拼接进 notebook 顶层，后续 cell 直接可用；
   语句 cell 只执行当前一次，历史副作用不重复；自写 `fn main` 的 cell 单独

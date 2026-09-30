@@ -81,6 +81,9 @@ priv struct Kernel {
   /// the OS can finish tearing the killed process tree down (a moon run
   /// started instantly after taskkill fails with exit 1 and no output)
   mut last_kill_ms : Int
+  /// elapsed_ms() when the last moon run was spawned; consecutive runs
+  /// need a small gap or some launches exit 1 silently on Windows
+  mut last_spawn_ms : Int
   /// all non-magic cells executed this session, in order; each cell run
   /// compiles the whole notebook again (accumulated replay), so
   /// definition cells stay visible to later cells
@@ -123,6 +126,7 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
     cell_imports: [],
     cell_timeout_ms: CELL_TIMEOUT_MS,
     last_kill_ms: -1000000,
+    last_spawn_ms: -1000000,
     replay_cells: [],
   }
   let shell = Channel::new("shell", "ROUTER")
@@ -472,7 +476,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
-const KERNEL_VERSION : String = "0.1.9"
+const KERNEL_VERSION : String = "0.2.0"
 
 ///|
 /// Return the last `keep` elements of `xs`.
@@ -522,9 +526,14 @@ fn lines_json(s : String) -> Json {
   let lines = s.split("\n")
     |> Iter::to_array
     |> Array::map(fn(v) { v.to_owned() })
+  json_strings(lines)
+}
+
+///|
+fn json_strings(items : Array[String]) -> Json {
   let out : Array[Json] = []
-  for l in lines {
-    out.push(Json::string(l))
+  for s in items {
+    out.push(Json::string(s))
   }
   Json::array(out)
 }
@@ -737,29 +746,26 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
     Some("time") => true
     _ => false
   }
+  // rich-output magics publish display_data with MIME bundles
+  match magic_name(code) {
+    Some("html") => {
+      publish_display_data(k, "text/html", magic_args(code))
+      finish_magic(k, peer, msg, count)
+      return
+    }
+    Some("md") => {
+      publish_display_data(k, "text/markdown", magic_args(code))
+      finish_magic(k, peer, msg, count)
+      return
+    }
+    _ => ()
+  }
   let magic = parse_magic(k, code)
   match magic {
     Some(output) => {
       log_kernel(k, LogLevel::Info, "magic command: \{code}")
       publish_stream(k, "stdout", output)
-      reply(
-        k,
-        peer,
-        "execute_reply",
-        @jupyter.obj([
-          ("status", Json::string("ok")),
-          ("execution_count", Json::number(count.to_double())),
-          ("payload", Json::array([])),
-          ("user_expressions", @jupyter.obj([])),
-          ("metadata", @jupyter.obj([])),
-        ]),
-        msg,
-      )
-      publish(
-        k,
-        "status",
-        @jupyter.obj([("execution_state", Json::string("idle"))]),
-      )
+      finish_magic(k, peer, msg, count)
       return
     }
     None => ()
@@ -835,7 +841,7 @@ fn handle_execute(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
           ("execution_count", Json::number(count.to_double())),
           ("ename", Json::string(ename)),
           ("evalue", Json::string(evalue)),
-          ("traceback", lines_json(traceback)),
+          ("traceback", json_strings(traceback)),
           ("metadata", meta),
         ]),
         msg,
@@ -960,16 +966,23 @@ const MAX_TIMEOUT_MS : Int = 3600000
 fn run_cell(
   k : Kernel,
   code : String,
-  on_done : (Bool, String, String, String, Int) -> Unit,
+  on_done : (Bool, String, String, Array[String], Int) -> Unit,
 ) -> Unit {
   // A moon run launched right after a force-kill fails instantly (exit 1,
   // no output) because the killed tree is still being torn down; give the
   // OS a moment before starting a new one.
-  let since_kill = @nodeff.elapsed_ms() - k.last_kill_ms
+  let now_ms = @nodeff.elapsed_ms()
+  let since_kill = now_ms - k.last_kill_ms
   if since_kill >= 0 && since_kill < 1000 {
     @nodeff.later(1000 - since_kill + 50, fn() { run_cell(k, code, on_done) })
     return
   }
+  let since_spawn = now_ms - k.last_spawn_ms
+  if since_spawn >= 0 && since_spawn < 300 {
+    @nodeff.later(300 - since_spawn + 30, fn() { run_cell(k, code, on_done) })
+    return
+  }
+  k.last_spawn_ms = now_ms
   let dir = @nodeff.mkdtemp()
   // Modules declared with %use become moon.mod imports ("module@version");
   // their package paths are imported by the generated moon.pkg. Both use
@@ -1034,19 +1047,20 @@ fn run_cell(
         k.metrics.error_count = k.metrics.error_count + 1
         log_kernel(k, LogLevel::Warn, "cell \{k.exec_count} interrupted")
         on_done(
-          false, "KeyboardInterrupt", "execution interrupted", "", duration_ms,
+          false, "KeyboardInterrupt", "execution interrupted", [], duration_ms,
         )
       } else if exit_code == 0 {
-        on_done(true, "", "", "", duration_ms)
+        on_done(true, "", "", [], duration_ms)
       } else {
         // a failed cell leaves no usable state: roll it back out of the replay
         k.replay_cells = drop_first(k.replay_cells, k.replay_cells.length() - replay_len_before)
         k.metrics.error_count = k.metrics.error_count + 1
-        let mut tb = last_lines(err_buf, 8)
+        // structured traceback: clean main.mbt:line:col entries + hint
+        let tb : Array[String] = diagnose(err_buf)
         match missing_package_hint(err_buf) {
           Some(hint) => {
             log_kernel(k, LogLevel::Info, hint)
-            tb = tb + "\n" + hint
+            tb.push(hint)
           }
           None => ()
         }
@@ -1082,7 +1096,7 @@ fn run_cell(
         false,
         "CellTimeout",
         "cell exceeded \{k.cell_timeout_ms / 1000}s and was terminated",
-        "",
+        [],
         duration_ms,
       )
     }
@@ -1160,6 +1174,124 @@ fn publish_stream(k : Kernel, name : String, text : String) -> Unit {
     "stream",
     @jupyter.obj([("name", Json::string(name)), ("text", Json::string(text))]),
   )
+}
+
+///|
+/// Publish a rich-output `display_data` message with a MIME bundle.
+fn publish_display_data(
+  k : Kernel,
+  mime : String,
+  content : String,
+) -> Unit {
+  publish(
+    k,
+    "display_data",
+    @jupyter.obj([
+      ("data", @jupyter.obj([(mime, Json::string(content))])),
+      ("metadata", @jupyter.obj([])),
+    ]),
+  )
+}
+
+///|
+/// Finish a magic command: ok execute_reply + idle status on iopub.
+fn finish_magic(
+  k : Kernel,
+  peer : Peer,
+  msg : @jupyter.JMsg,
+  count : Int,
+) -> Unit {
+  reply(
+    k,
+    peer,
+    "execute_reply",
+    @jupyter.obj([
+      ("status", Json::string("ok")),
+      ("execution_count", Json::number(count.to_double())),
+      ("payload", Json::array([])),
+      ("user_expressions", @jupyter.obj([])),
+      ("metadata", @jupyter.obj([])),
+    ]),
+    msg,
+  )
+  publish(
+    k,
+    "status",
+    @jupyter.obj([("execution_state", Json::string("idle"))]),
+  )
+}
+
+///|
+fn trim_ascii(s : String) -> String {
+  let mut start = 0
+  let mut end = s.length()
+  while start < end && (s[start] == 32 || s[start] == 13 || s[start] == 9) {
+    start = start + 1
+  }
+  while end > start && (s[end - 1] == 32 || s[end - 1] == 13 || s[end - 1] == 9) {
+    end = end - 1
+  }
+  @bx.sslice(s, start, end)
+}
+
+///|
+/// Rewrite a location like `F:\...\moonbit-cell-XXXX\src\main\main.mbt:2:9`
+/// into the notebook-relative `main.mbt:2:9`.
+fn normalize_location(path : String) -> String {
+  let marker = "main.mbt"
+  let mut i = path.length() - marker.length()
+  while i >= 0 {
+    if i + marker.length() <= path.length() &&
+      @bx.sslice(path, i, i + marker.length()) == marker {
+      return @bx.sslice(path, i, path.length())
+    }
+    i = i - 1
+  }
+  path
+}
+
+///|
+/// Turn raw `moon run` diagnostics into a clean, structured traceback:
+/// the box-drawing frames are collapsed into `main.mbt:line:col: message`
+/// entries, one per error/warning, in order.
+fn diagnose(err_buf : String) -> Array[String] {
+  let out : Array[String] = []
+  let mut loc = ""
+  let lines = err_buf.split("\n")
+    |> Iter::to_array
+    |> Array::map(fn(v) { v.to_owned() })
+  for raw in lines {
+    let t = trim_ascii(raw)
+    if t.contains("╭─[") {
+      let parts = t.split("╭─[")
+        |> Iter::to_array
+        |> Array::map(fn(v) { v.to_owned() })
+      let tail = parts[parts.length() - 1]
+      let segs = tail.split("]")
+        |> Iter::to_array
+        |> Array::map(fn(v) { v.to_owned() })
+      loc = normalize_location(trim_ascii(segs[0]))
+    } else if t.contains("╰──") {
+      let parts = t.split("╰──")
+        |> Iter::to_array
+        |> Array::map(fn(v) { v.to_owned() })
+      let msg = trim_ascii(parts[parts.length() - 1])
+      if loc != "" {
+        out.push("\{loc}: \{msg}")
+        loc = ""
+      } else {
+        out.push(msg)
+      }
+    } else if t.contains("Error: [") || t.contains("Warning: [") {
+      out.push(t)
+    } else if t.contains("│") {
+      () // box-drawing content lines are visual noise
+    } else if t != "" {
+      // non-boxed output (e.g. linker/runtime messages) passes through
+      out.push(t)
+    }
+  }
+  out
 }
 
 ///|
@@ -1361,6 +1493,8 @@ fn parse_magic(k : Kernel, code : String) -> String? {
         "  %time <code>       — run code and report its wall time\n" +
         "  %use [<pkg>@<v> …] — import external package(s) into cells\n" +
         "  %timeout [<ms>]    — show/set the per-cell wall-time limit\n" +
+        "  %html <content>    — render rich HTML output (display_data)\n" +
+        "  %md <content>      — render rich Markdown output\n" +
         "  %reset             — clear history, counters and metrics",
       )
     "history" => {
@@ -1503,18 +1637,6 @@ fn json_scalar(j : Json) -> String {
 }
 
 ///|
-fn last_lines(buf : String, count : Int) -> String {
-  let lines = buf.split("\n")
-    |> Iter::to_array
-    |> Array::map(fn(v) { v.to_owned() })
-  let start = if lines.length() > count { lines.length() - count } else { 0 }
-  let sel : Array[String] = []
-  for i = start; i < lines.length(); i = i + 1 {
-    sel.push(lines[i])
-  }
-  sel.join("\n")
-}
-
 ///|
 /// Log kernel statistics periodically
 fn log_kernel_stats(k : Kernel) -> Unit {
@@ -1932,4 +2054,25 @@ test "build_replay treats a definition cell as compile-only" {
   assert_true(src.contains("let n = 21"))
   // main body stays empty: nothing to execute, binding joins the state
   assert_true(src.contains("fn main {\n}"))
+}
+
+///|
+test "diagnose collapses moon diagnostics into structured entries" {
+  let raw = "Error: [4021]\n" +
+    "    ╭─[ F:\\Users\\x\\Temp\\moonbit-cell-ABC\\src\\main\\main.mbt:2:9 ]\n" +
+    "    │\n" +
+    "  2 │ println(n)\n" +
+    "    │         ┬  \n" +
+    "    │         ╰── The value identifier n is unbound.\n"
+  let entries = diagnose(raw)
+  assert_eq(entries.length(), 2)
+  assert_eq(entries[0], "Error: [4021]")
+  assert_eq(entries[1], "main.mbt:2:9: The value identifier n is unbound.")
+}
+
+///|
+test "diagnose passes through non-boxed error lines" {
+  let entries = diagnose("linking failed for unknown reason\n")
+  assert_eq(entries.length(), 1)
+  assert_eq(entries[0], "linking failed for unknown reason")
 }
