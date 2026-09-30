@@ -11,7 +11,3 @@ license = "MIT"
 readme = "README.md"
 
 repository = "https://github.com/Mr-Shi123/moonjupyter"
-
-import {
-  "moonbitlang/async@0.22.4",
-}
