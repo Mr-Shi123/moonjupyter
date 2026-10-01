@@ -127,6 +127,9 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 ## Changelog
 
+- **v0.2.2** — TAB 补全支持魔法命令：输入 `%` 后按 Tab 列出全部魔法，
+  `%ht` 前缀过滤出 `%html` 等（含单测与端到端验证）
+
 - **v0.2.1** — notebook-style value display: a cell starting with `=`
   (`= n * 2`) prints the expression value, Out-style; transient silent
   moon run failures (exit 1, no output, within 600ms) are now retried

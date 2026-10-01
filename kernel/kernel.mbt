@@ -476,7 +476,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
-const KERNEL_VERSION : String = "0.2.1"
+const KERNEL_VERSION : String = "0.2.2"
 
 ///|
 /// Return the last `keep` elements of `xs`.
@@ -907,6 +907,14 @@ fn is_digit_char(c : UInt16) -> Bool {
 /// TAB completion: extract the identifier ending at `cursor_pos` and suggest
 /// keywords plus identifiers that appear anywhere in the cell. Returns
 /// (cursor_start, cursor_end, matches).
+/// Magic command names offered by TAB completion when the token is
+/// preceded by '%'.
+let magic_names : Array[String] = [
+  "%help", "%history", "%stats", "%time", "%use", "%timeout", "%html",
+  "%md", "%reset",
+]
+
+///|
 fn complete_token(code : String, cursor_pos : Int) -> (Int, Int, Array[String]) {
   let end = if cursor_pos > code.length() { code.length() } else { cursor_pos }
   let mut start = end
@@ -914,6 +922,19 @@ fn complete_token(code : String, cursor_pos : Int) -> (Int, Int, Array[String]) 
     start = start - 1
   }
   let token = @bx.sslice(code, start, end)
+  // magic completion: a token preceded by '%' completes magic names
+  // (covers a bare '%' too — the whole "%magic" token gets replaced)
+  if start > 0 && code[start - 1] == 37 {
+    let with_pct = "%" + token
+    let matches : Array[String] = []
+    for m in magic_names {
+      if m.length() >= with_pct.length() &&
+        @bx.sslice(m, 0, with_pct.length()) == with_pct {
+        matches.push(m)
+      }
+    }
+    return (start - 1, end, matches)
+  }
   if token == "" {
     return (end, end, [])
   }
@@ -2216,4 +2237,20 @@ test "value display classification" {
   assert_true(value_display_kind("a == b") is NotDisplay)
   assert_true(value_display_kind("println(1)") is NotDisplay)
   assert_true(value_display_kind("") is NotDisplay)
+}
+
+///|
+test "completion suggests magic commands after %" {
+  // %ht prefix matches only %html
+  let (start, end, matches) = complete_token("%ht", 3)
+  assert_eq(start, 0)
+  assert_eq(end, 3)
+  assert_eq(matches, ["%html"])
+  // bare % lists every magic
+  let (s2, _e2, all) = complete_token("%", 1)
+  assert_eq(s2, 0)
+  assert_eq(all.length(), 9)
+  // '%' mid-expression (modulo) yields no magic suggestions
+  let (_s3, _e3, none) = complete_token("let x = 5 % 3", 13)
+  assert_eq(none.length(), 0)
 }
