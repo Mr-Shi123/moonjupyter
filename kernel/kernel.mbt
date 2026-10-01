@@ -74,7 +74,7 @@ priv struct Kernel {
   /// extra modules declared via %use, added to every cell project
   mut cell_deps : Array[(String, String)] // (module, version)
   /// package paths imported into every cell project
-  cell_imports : Array[String]
+  mut cell_imports : Array[String]
   /// per-cell wall-time limit, adjustable via the %timeout magic
   mut cell_timeout_ms : Int
   /// elapsed_ms() of the last force-kill; the next cell waits a beat so
@@ -486,7 +486,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
-const KERNEL_VERSION : String = "0.2.4"
+const KERNEL_VERSION : String = "0.2.5"
 
 ///|
 /// Return the last `keep` elements of `xs`.
@@ -626,6 +626,14 @@ fn magic_doc(name : String) -> String? {
       Some("%md <content> — render content as Markdown via display_data.")
     "%reset" =>
       Some("clear history, replay state, execution counter and metrics.")
+    "%who" =>
+      Some(
+        "list the names and kinds defined in the current notebook replay state."
+      )
+    "%unuse" =>
+      Some(
+        "%unuse <package-path> — remove a package registered via %use; takes effect on the next cell."
+      )
     _ => None
   }
 }
@@ -970,7 +978,7 @@ fn is_digit_char(c : UInt16) -> Bool {
 /// preceded by '%'.
 let magic_names : Array[String] = [
   "%about", "%help", "%history", "%stats", "%time", "%use", "%timeout", "%html",
-  "%md", "%reset",
+  "%md", "%reset", "%who", "%unuse",
 ]
 
 ///|
@@ -1453,6 +1461,99 @@ fn diagnose(err_buf : String) -> Array[String] {
 }
 
 ///|
+/// Parse a non-negative whole number; used by magics taking counts.
+fn parse_int(arg : String) -> Int? {
+  if arg == "" || arg.length() > 9 {
+    return None
+  }
+  let mut v = 0
+  for i = 0; i < arg.length(); i = i + 1 {
+    let c = arg[i]
+    if c < 48 || c > 57 {
+      return None
+    }
+    v = v * 10 + c.to_int() - 48
+  }
+  Some(v)
+}
+
+///|
+/// Names and kinds of the top-level bindings accumulated in the replay:
+/// for every definition line, the token after the declaration keyword
+/// (`let mut x` counts as `x`). Statement cells contribute nothing —
+/// their bindings are function-local.
+fn notebook_definitions(cells : Array[String]) -> Array[(String, String)] {
+  let out : Array[(String, String)] = []
+  for cell in cells {
+    if !is_def_cell(cell) {
+      continue
+    }
+    let lines = cell.split("\n")
+      |> Iter::to_array
+      |> Array::map(fn(v) { v.to_owned() })
+    for line in lines {
+      let t = trim_ascii(line)
+      if t == "" || (t.length() >= 2 && t[0] == 47 && t[1] == 47) {
+        continue // blank or // comment
+      }
+      let toks = first_idents(t, 3)
+      if toks.length() < 2 || !is_def_cell(t) {
+        continue
+      }
+      let kind = toks[0]
+      let name = if kind == "let" && toks.length() >= 3 && toks[1] == "mut" {
+        toks[2]
+      } else {
+        toks[1]
+      }
+      out.push((name, kind))
+    }
+  }
+  out
+}
+
+///|
+/// The first `count` identifier tokens of a trimmed line.
+fn first_idents(t : String, count : Int) -> Array[String] {
+  let out : Array[String] = []
+  let mut i = 0
+  while i < t.length() && out.length() < count {
+    if is_ident_char(t[i]) {
+      let start = i
+      while i < t.length() && is_ident_char(t[i]) {
+        i = i + 1
+      }
+      out.push(@bx.sslice(t, start, i))
+    } else {
+      i = i + 1
+    }
+  }
+  out
+}
+
+///|
+fn filter_ne(xs : Array[String], drop : String) -> Array[String] {
+  let out : Array[String] = []
+  for x in xs {
+    if x != drop {
+      out.push(x)
+    }
+  }
+  out
+}
+
+///|
+fn[T] filter_by(xs : Array[T], keep : (T) -> Bool) -> Array[T] {
+  let out : Array[T] = []
+  for x in xs {
+    if keep(x) {
+      out.push(x)
+    }
+  }
+  out
+}
+
+///|
 /// Parse a %timeout argument: whole milliseconds in [MIN, MAX].
 fn parse_timeout_ms(arg : String) -> Int? {
   if arg == "" || arg.length() > 8 {
@@ -1657,15 +1758,71 @@ fn parse_magic(k : Kernel, code : String) -> String? {
   match name {
     "help" => Some(MAGIC_HELP)
     "history" => {
+      // optional count: %history 5 shows only the last 5 cells
+      let shown = match parse_int(magic_args(code)) {
+        Some(n) => if n < k.history.length() { n } else { k.history.length() }
+        None => k.history.length()
+      }
       let mut out = "recent cells:\n"
-      for entry in k.history {
-        let (n, c) = entry
+      let start = k.history.length() - shown
+      for i = start; i < k.history.length(); i = i + 1 {
+        let (n, c) = k.history[i]
         out = out + "  \{n}: \{c}\n"
       }
       if k.history.length() == 0 {
         out = out + "  (none yet)\n"
       }
       Some(out)
+    }
+    "who" => {
+      let names = notebook_definitions(k.replay_cells)
+      let mut out = "notebook definitions (\{names.length()}):\n"
+      for d in names {
+        let (name, kind) = d
+        out = out + "  \{name} : \{kind}\n"
+      }
+      if names.length() == 0 {
+        out = out + "  (none — definition cells like 'let n = 1' land here)\n"
+      }
+      Some(out)
+    }
+    "unuse" => {
+      let arg = magic_args(code)
+      if arg == "" {
+        Some("usage: %unuse <package-path> — active packages are listed by %use")
+      } else if !arr_contains(k.cell_imports, arg) {
+        Some("not an active package: \{arg} (see %use)")
+      } else {
+        let segs = arg.split("/")
+          |> Iter::to_array
+          |> Array::map(fn(v) { v.to_owned() })
+        let target_mod = if segs.length() >= 2 {
+          "\{segs[0]}/\{segs[1]}"
+        } else {
+          arg
+        }
+        k.cell_imports = filter_ne(k.cell_imports, arg)
+        // drop the module only when no remaining import still needs it
+        k.cell_deps = filter_by(k.cell_deps, fn(dep) {
+          let (m, _v) = dep
+          let mut needed = false
+          for imp in k.cell_imports {
+            let isegs = imp.split("/")
+              |> Iter::to_array
+              |> Array::map(fn(v) { v.to_owned() })
+            let imp_mod = if isegs.length() >= 2 {
+              "\{isegs[0]}/\{isegs[1]}"
+            } else {
+              imp
+            }
+            if imp_mod == m {
+              needed = true
+            }
+          }
+          needed
+        })
+        Some("removed \{arg} (module \{target_mod}) — takes effect on the next cell")
+      }
     }
     "stats" => {
       let stats = get_performance_stats(k)
@@ -2316,7 +2473,7 @@ test "completion suggests magic commands after %" {
   // bare % lists every magic
   let (s2, _e2, all) = complete_token("%", 1)
   assert_eq(s2, 0)
-  assert_eq(all.length(), 10)
+  assert_eq(all.length(), 12)
   // '%' mid-expression (modulo) yields no magic suggestions
   let (_s3, _e3, none) = complete_token("let x = 5 % 3", 13)
   assert_eq(none.length(), 0)
@@ -2335,4 +2492,39 @@ test "magic docs serve inspect queries" {
   }
   assert_true(doc.contains("%reset"))
   assert_true(doc.contains("%timeout"))
+}
+
+///|
+test "notebook_definitions extracts names and kinds" {
+  let cells = [
+    "let n = 21",
+    "let mut counter = 0\nfn bump() { counter = counter + 1 }",
+    "// annotated\nstruct Point { x : Int }",
+    "println(n)", // statement cell: nothing to list
+  ]
+  let names = notebook_definitions(cells)
+  assert_eq(names.length(), 4)
+  let (n0, k0) = names[0]
+  assert_eq(n0, "n")
+  assert_eq(k0, "let")
+  let (n1, k1) = names[1]
+  assert_eq(n1, "counter")
+  assert_eq(k1, "let")
+  let (n2, k2) = names[2]
+  assert_eq(n2, "bump")
+  assert_eq(k2, "fn")
+  let (n3, k3) = names[3]
+  assert_eq(n3, "Point")
+  assert_eq(k3, "struct")
+}
+
+///|
+test "parse_int accepts plain counts" {
+  match parse_int("7") {
+    Some(v) => assert_eq(v, 7)
+    None => assert_true(false)
+  }
+  assert_true(parse_int("") is None)
+  assert_true(parse_int("-1") is None)
+  assert_true(parse_int("3a") is None)
 }

@@ -127,6 +127,10 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 ## Changelog
 
+- **v0.2.5** — 状态管理三件套：`%who` 列出重放状态中的全部定义
+  （名字 + 种类）、`%unuse <pkg>` 移除已注册的外部包（`%use` 闭环）、
+  `%history <n>` 只显示最近 n 个 cell
+
 - **v0.2.4** — 新魔法 `%about`：一条命令自报家门——内核版本、MoonBit
   工具链、运行时长、超时设置、重放 cell 数与外部包清单；`%` 补全与
   inspect 文档同步收录
