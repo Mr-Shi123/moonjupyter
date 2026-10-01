@@ -386,8 +386,18 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
     "inspect_request" => {
       let code = @jupyter.jstr_field(msg.content, "code")
       let cursor = @jupyter.jint_field(msg.content, "cursor_pos")
-      let (_start, _end, token) = token_at(code, cursor)
-      let doc = lookup_doc(token)
+      let (start, _end, token) = token_at(code, cursor)
+      // a token preceded by '%' documents a magic command; a bare '%'
+      // documents the whole magic list
+      let doc = if start > 0 && code[start - 1] == 37 {
+        if token == "" {
+          Some(MAGIC_HELP)
+        } else {
+          magic_doc("%" + token)
+        }
+      } else {
+        lookup_doc(token)
+      }
       let data = match doc {
         Some(text) => @jupyter.obj([("text/plain", Json::string(text))])
         None => @jupyter.obj([])
@@ -476,7 +486,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
-const KERNEL_VERSION : String = "0.2.2"
+const KERNEL_VERSION : String = "0.2.3"
 
 ///|
 /// Return the last `keep` elements of `xs`.
@@ -569,6 +579,51 @@ fn token_at(code : String, cursor_pos : Int) -> (Int, Int, String) {
     end = end + 1
   }
   (start, end, @bx.sslice(code, start, end))
+}
+
+///|
+/// The magic-command list shown by %help and documented as a whole when
+/// Shift+Tab is pressed on a bare '%'.
+const MAGIC_HELP : String = "moonjupyter magic commands:\n" +
+  "  %help              — show this list\n" +
+  "  %history           — show the last executed cells\n" +
+  "  %stats             — show kernel performance statistics\n" +
+  "  %time <code>       — run code and report its wall time\n" +
+  "  %use [<pkg>@<v> …] — import external package(s) into cells\n" +
+  "  %timeout [<ms>]    — show/set the per-cell wall-time limit\n" +
+  "  %html <content>    — render rich HTML output (display_data)\n" +
+  "  %md <content>      — render rich Markdown output\n" +
+  "  %reset             — clear history, counters and metrics"
+
+///|
+/// Short documentation for the magic commands, served to Shift+Tab
+/// (inspect_request) queries on tokens preceded by '%'.
+fn magic_doc(name : String) -> String? {
+  match name {
+    "%help" => Some("show the list of magic commands.")
+    "%history" => Some("show the last executed cells (up to 100).")
+    "%stats" =>
+      Some(
+        "show kernel performance statistics: message counts, error rate, throughput.",
+      )
+    "%time" =>
+      Some("%time <code> — run the remainder as MoonBit code and report its wall time.")
+    "%use" =>
+      Some(
+        "%use <pkg-path>@<version> … — import mooncakes package(s) into subsequent cells; the version is mandatory.",
+      )
+    "%timeout" =>
+      Some(
+        "%timeout [<ms>] — show or set the per-cell wall-time limit (5000..3600000).",
+      )
+    "%html" =>
+      Some("%html <content> — render content as rich HTML via display_data.")
+    "%md" =>
+      Some("%md <content> — render content as Markdown via display_data.")
+    "%reset" =>
+      Some("clear history, replay state, execution counter and metrics.")
+    _ => None
+  }
 }
 
 ///|
@@ -1596,19 +1651,7 @@ fn parse_magic(k : Kernel, code : String) -> String? {
     None => return None
   }
   match name {
-    "help" =>
-      Some(
-        "moonjupyter magic commands:\n" +
-        "  %help              — show this list\n" +
-        "  %history           — show the last executed cells\n" +
-        "  %stats             — show kernel performance statistics\n" +
-        "  %time <code>       — run code and report its wall time\n" +
-        "  %use [<pkg>@<v> …] — import external package(s) into cells\n" +
-        "  %timeout [<ms>]    — show/set the per-cell wall-time limit\n" +
-        "  %html <content>    — render rich HTML output (display_data)\n" +
-        "  %md <content>      — render rich Markdown output\n" +
-        "  %reset             — clear history, counters and metrics",
-      )
+    "help" => Some(MAGIC_HELP)
     "history" => {
       let mut out = "recent cells:\n"
       for entry in k.history {
@@ -2253,4 +2296,18 @@ test "completion suggests magic commands after %" {
   // '%' mid-expression (modulo) yields no magic suggestions
   let (_s3, _e3, none) = complete_token("let x = 5 % 3", 13)
   assert_eq(none.length(), 0)
+}
+
+///|
+test "magic docs serve inspect queries" {
+  assert_true(magic_doc("%timeout") is Some(_))
+  assert_true(magic_doc("%html") is Some(_))
+  assert_true(magic_doc("%bogus") is None)
+  // the shared help text lists every documented magic
+  let doc = match magic_doc("%help") {
+    Some(_) => MAGIC_HELP
+    None => ""
+  }
+  assert_true(doc.contains("%reset"))
+  assert_true(doc.contains("%timeout"))
 }

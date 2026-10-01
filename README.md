@@ -127,6 +127,10 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 ## Changelog
 
+- **v0.2.3** — inspect（Shift+Tab）支持魔法命令文档：在 `%timeout` 等
+  魔法上查询显示其用法说明，裸 `%` 显示完整魔法列表；`%help` 文本
+  收敛为单一常量
+
 - **v0.2.2** — TAB 补全支持魔法命令：输入 `%` 后按 Tab 列出全部魔法，
   `%ht` 前缀过滤出 `%html` 等（含单测与端到端验证）
 
