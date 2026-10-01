@@ -486,7 +486,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
-const KERNEL_VERSION : String = "0.2.3"
+const KERNEL_VERSION : String = "0.2.4"
 
 ///|
 /// Return the last `keep` elements of `xs`.
@@ -600,6 +600,10 @@ const MAGIC_HELP : String = "moonjupyter magic commands:\n" +
 /// (inspect_request) queries on tokens preceded by '%'.
 fn magic_doc(name : String) -> String? {
   match name {
+    "%about" =>
+      Some(
+        "show kernel identity and state: version, toolchain, uptime, timeout, external packages."
+      )
     "%help" => Some("show the list of magic commands.")
     "%history" => Some("show the last executed cells (up to 100).")
     "%stats" =>
@@ -965,7 +969,7 @@ fn is_digit_char(c : UInt16) -> Bool {
 /// Magic command names offered by TAB completion when the token is
 /// preceded by '%'.
 let magic_names : Array[String] = [
-  "%help", "%history", "%stats", "%time", "%use", "%timeout", "%html",
+  "%about", "%help", "%history", "%stats", "%time", "%use", "%timeout", "%html",
   "%md", "%reset",
 ]
 
@@ -1675,6 +1679,26 @@ fn parse_magic(k : Kernel, code : String) -> String? {
       }
       Some(out)
     }
+    "about" => {
+      let uptime = @nodeff.now_seconds() - k.start_time
+      let mut pkgs = ""
+      for i = 0; i < k.cell_imports.length(); i = i + 1 {
+        let (m, v) = k.cell_deps[i]
+        pkgs = pkgs + "  " + k.cell_imports[i] + " (" + m + "@" + v + ")\n"
+      }
+      if k.cell_imports.length() == 0 {
+        pkgs = "  (none)\n"
+      }
+      Some(
+        "moonjupyter " + KERNEL_VERSION + "\n" +
+        "  MoonBit toolchain: " + k.language_version + "\n" +
+        "  uptime: " + uptime.to_string() +
+        "s | cells executed: " + k.exec_count.to_string() + "\n" +
+        "  cell timeout: " + k.cell_timeout_ms.to_string() +
+        " ms | replay cells: " + k.replay_cells.length().to_string() + "\n" +
+        "  external packages:\n" + pkgs,
+      )
+    }
     "reset" => {
       k.history = []
       k.replay_cells = []
@@ -2292,7 +2316,7 @@ test "completion suggests magic commands after %" {
   // bare % lists every magic
   let (s2, _e2, all) = complete_token("%", 1)
   assert_eq(s2, 0)
-  assert_eq(all.length(), 9)
+  assert_eq(all.length(), 10)
   // '%' mid-expression (modulo) yields no magic suggestions
   let (_s3, _e3, none) = complete_token("let x = 5 % 3", 13)
   assert_eq(none.length(), 0)
@@ -2300,6 +2324,7 @@ test "completion suggests magic commands after %" {
 
 ///|
 test "magic docs serve inspect queries" {
+  assert_true(magic_doc("%about") is Some(_))
   assert_true(magic_doc("%timeout") is Some(_))
   assert_true(magic_doc("%html") is Some(_))
   assert_true(magic_doc("%bogus") is None)

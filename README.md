@@ -127,6 +127,10 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 ## Changelog
 
+- **v0.2.4** — 新魔法 `%about`：一条命令自报家门——内核版本、MoonBit
+  工具链、运行时长、超时设置、重放 cell 数与外部包清单；`%` 补全与
+  inspect 文档同步收录
+
 - **v0.2.3** — inspect（Shift+Tab）支持魔法命令文档：在 `%timeout` 等
   魔法上查询显示其用法说明，裸 `%` 显示完整魔法列表；`%help` 文本
   收敛为单一常量
