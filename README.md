@@ -127,6 +127,11 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 
 ## Changelog
 
+- **v0.2.6** — 性能：cell 输出按 8KB 批次发布到 iopub（此前逐行发布，
+  每行一次 JSON+HMAC 封帧；2 万行输出从 ~2 万条消息降到 8 条），
+  空行输出不再丢失，超时/中断路径也会交付已打印的输出；
+  `%unuse all` 一键清空外部包；补充 build_replay 混合序与数组辅助单测
+
 - **v0.2.5** — 状态管理三件套：`%who` 列出重放状态中的全部定义
   （名字 + 种类）、`%unuse <pkg>` 移除已注册的外部包（`%use` 闭环）、
   `%history <n>` 只显示最近 n 个 cell

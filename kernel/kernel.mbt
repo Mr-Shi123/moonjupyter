@@ -77,6 +77,10 @@ priv struct Kernel {
   mut cell_imports : Array[String]
   /// per-cell wall-time limit, adjustable via the %timeout magic
   mut cell_timeout_ms : Int
+  /// pending complete-line batches per stream, published once they reach
+  /// BATCH_FLUSH_BYTES (output batching)
+  mut batch_out : String
+  mut batch_err : String
   /// elapsed_ms() of the last force-kill; the next cell waits a beat so
   /// the OS can finish tearing the killed process tree down (a moon run
   /// started instantly after taskkill fails with exit 1 and no output)
@@ -125,6 +129,8 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
     cell_deps: [],
     cell_imports: [],
     cell_timeout_ms: CELL_TIMEOUT_MS,
+    batch_out: "",
+    batch_err: "",
     last_kill_ms: -1000000,
     last_spawn_ms: -1000000,
     replay_cells: [],
@@ -486,7 +492,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
-const KERNEL_VERSION : String = "0.2.5"
+const KERNEL_VERSION : String = "0.2.6"
 
 ///|
 /// Return the last `keep` elements of `xs`.
@@ -1198,9 +1204,14 @@ fn run_cell(
         return
       }
       k.metrics.execution_time["exec-\{k.exec_count}"] = duration_ms
+      flush_stream_batches(k)
       flush_pending(k, out_buf, "stdout")
       flush_pending(k, err_buf, "stderr")
       if k.cell_interrupted {
+        // aborted mid-run: deliver whatever it managed to print
+        flush_stream_batches(k)
+        flush_pending(k, out_buf, "stdout")
+        flush_pending(k, err_buf, "stderr")
         // aborted mid-run: its half-finished state must not join the replay
         k.replay_cells = keep_first(k.replay_cells, replay_len_before)
         k.metrics.error_count = k.metrics.error_count + 1
@@ -1246,7 +1257,11 @@ fn run_cell(
       let duration_ms = @nodeff.elapsed_ms() - started
       k.metrics.execution_time["exec-\{k.exec_count}"] = duration_ms
       k.metrics.error_count = k.metrics.error_count + 1
-      // a timed-out cell never finished; its code leaves no usable state
+      // a timed-out cell never finished; deliver the output it printed
+      flush_stream_batches(k)
+      flush_pending(k, out_buf, "stdout")
+      flush_pending(k, err_buf, "stderr")
+      // and its half-finished state leaves no usable replay
       k.replay_cells = keep_first(k.replay_cells, replay_len_before)
       @nodeff.rmrf(dir)
       on_done(
@@ -1273,40 +1288,95 @@ fn contains_main_fn(code : String) -> Bool {
 const MAX_PENDING_OUTPUT : Int = 1024 * 1024
 
 ///|
+/// Complete lines are batched into iopub messages of at least this size:
+/// one publish per line would pay JSON + HMAC framing for every single
+/// line of chatty cells.
+const BATCH_FLUSH_BYTES : Int = 8192
+
+///|
 /// Forward complete lines of an output stream to iopub as `stream` messages.
-/// Returns the trailing partial line (kept until more output arrives).
+/// Complete lines are appended to a per-stream batch that is published once
+/// it reaches BATCH_FLUSH_BYTES; returns the trailing partial line (kept
+/// until more output arrives). Blank lines are preserved.
 fn stream_lines(k : Kernel, buf : String, name : String) -> String {
   let lines = buf.split("\n")
     |> Iter::to_array
     |> Array::map(fn(v) { v.to_owned() })
   let n = lines.length()
+  let mut batch = if name == "stderr" {
+    k.batch_err
+  } else {
+    k.batch_out
+  }
   for i = 0; i < n - 1; i = i + 1 {
-    if lines[i] != "" {
-      publish(
-        k,
-        "stream",
-        @jupyter.obj([
-          ("name", Json::string(name)),
-          ("text", Json::string(lines[i] + "\n")),
-        ]),
-      )
-    }
+    batch = batch + lines[i] + "\n"
   }
   let partial = lines[n - 1]
   if partial.length() > MAX_PENDING_OUTPUT {
     // Flush the oversized fragment as if it were a complete line; the
     // output is forwarded intact, only line boundaries inside it are lost.
+    batch = batch + partial
     publish(
       k,
       "stream",
       @jupyter.obj([
         ("name", Json::string(name)),
-        ("text", Json::string(partial)),
+        ("text", Json::string(batch)),
       ]),
     )
+    if name == "stderr" {
+      k.batch_err = ""
+    } else {
+      k.batch_out = ""
+    }
     return ""
   }
+  if batch.length() >= BATCH_FLUSH_BYTES {
+    publish(
+      k,
+      "stream",
+      @jupyter.obj([
+        ("name", Json::string(name)),
+        ("text", Json::string(batch)),
+      ]),
+    )
+    batch = ""
+  }
+  if name == "stderr" {
+    k.batch_err = batch
+  } else {
+    k.batch_out = batch
+  }
   partial
+}
+
+///|
+///|
+/// Publish whatever complete-line batches are still pending on both
+/// streams (cell exit, interrupt and timeout paths).
+fn flush_stream_batches(k : Kernel) -> Unit {
+  if k.batch_out != "" {
+    publish(
+      k,
+      "stream",
+      @jupyter.obj([
+        ("name", Json::string("stdout")),
+        ("text", Json::string(k.batch_out)),
+      ]),
+    )
+    k.batch_out = ""
+  }
+  if k.batch_err != "" {
+    publish(
+      k,
+      "stream",
+      @jupyter.obj([
+        ("name", Json::string("stderr")),
+        ("text", Json::string(k.batch_err)),
+      ]),
+    )
+    k.batch_err = ""
+  }
 }
 
 ///|
@@ -1789,7 +1859,12 @@ fn parse_magic(k : Kernel, code : String) -> String? {
     "unuse" => {
       let arg = magic_args(code)
       if arg == "" {
-        Some("usage: %unuse <package-path> — active packages are listed by %use")
+        Some("usage: %unuse <package-path> | all — active packages are listed by %use")
+      } else if arg == "all" {
+        let count = k.cell_imports.length()
+        k.cell_imports = []
+        k.cell_deps = []
+        Some("removed all external packages (\{count}) — takes effect on the next cell")
       } else if !arr_contains(k.cell_imports, arg) {
         Some("not an active package: \{arg} (see %use)")
       } else {
@@ -2527,4 +2602,41 @@ test "parse_int accepts plain counts" {
   assert_true(parse_int("") is None)
   assert_true(parse_int("-1") is None)
   assert_true(parse_int("3a") is None)
+}
+
+///|
+test "build_replay keeps definition order across interleaved cells" {
+  let past = [
+    "let a = 1",
+    "println(a)",
+    "fn double(x : Int) -> Int { x * 2 }",
+  ]
+  let src = build_replay(past, "println(double(a))")
+  // definitions land at top level in cell order
+  assert_true(src.contains("let a = 1"))
+  assert_true(src.contains("fn double(x : Int) -> Int { x * 2 }"))
+  // statement cells become numbered functions; only the current one runs
+  assert_true(src.contains("fn __cell_2() -> Unit {"))
+  assert_true(src.contains("fn __cell_4() -> Unit {"))
+  assert_true(src.contains("fn main {\n  __cell_4()\n}"))
+  assert_true(!src.contains("  __cell_2()"))
+  assert_true(!src.contains("  __cell_3()"))
+}
+
+///|
+test "keep_first and drop_first slice from opposite ends" {
+  assert_eq(keep_first([1, 2, 3, 4], 2), [1, 2])
+  assert_eq(drop_first([1, 2, 3, 4], 2), [3, 4])
+  // over-sized keep/drop are safe
+  assert_eq(keep_first([1, 2], 5), [1, 2])
+  assert_eq(drop_first([1, 2], 5), [])
+}
+
+///|
+test "filter helpers keep or drop selectively" {
+  assert_eq(filter_ne(["a", "b", "a"], "a"), ["b"])
+  assert_eq(
+    filter_by([1, 2, 3, 4], fn(x) { x > 2 }),
+    [3, 4],
+  )
 }
