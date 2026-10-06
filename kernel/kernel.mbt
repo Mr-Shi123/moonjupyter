@@ -492,7 +492,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
-const KERNEL_VERSION : String = "0.2.6"
+const KERNEL_VERSION : String = "0.2.7"
 
 ///|
 /// Return the last `keep` elements of `xs`.
@@ -591,8 +591,10 @@ fn token_at(code : String, cursor_pos : Int) -> (Int, Int, String) {
 /// The magic-command list shown by %help and documented as a whole when
 /// Shift+Tab is pressed on a bare '%'.
 const MAGIC_HELP : String = "moonjupyter magic commands:\n" +
+  "  %about             — kernel identity and state summary\n" +
   "  %help              — show this list\n" +
   "  %history           — show the last executed cells\n" +
+  "  %logs [<n>]        — tail the kernel internal log\n" +
   "  %stats             — show kernel performance statistics\n" +
   "  %time <code>       — run code and report its wall time\n" +
   "  %use [<pkg>@<v> …] — import external package(s) into cells\n" +
@@ -606,6 +608,10 @@ const MAGIC_HELP : String = "moonjupyter magic commands:\n" +
 /// (inspect_request) queries on tokens preceded by '%'.
 fn magic_doc(name : String) -> String? {
   match name {
+    "%logs" =>
+      Some(
+        "%logs [<n>] — show the last n kernel log entries (default 30): executions, errors, maintenance."
+      )
     "%about" =>
       Some(
         "show kernel identity and state: version, toolchain, uptime, timeout, external packages."
@@ -983,7 +989,7 @@ fn is_digit_char(c : UInt16) -> Bool {
 /// Magic command names offered by TAB completion when the token is
 /// preceded by '%'.
 let magic_names : Array[String] = [
-  "%about", "%help", "%history", "%stats", "%time", "%use", "%timeout", "%html",
+  "%about", "%help", "%logs", "%history", "%stats", "%time", "%use", "%timeout", "%html",
   "%md", "%reset", "%who", "%unuse",
 ]
 
@@ -1911,6 +1917,23 @@ fn parse_magic(k : Kernel, code : String) -> String? {
       }
       Some(out)
     }
+    "logs" => {
+      // optional count: %logs 50 shows the last 50 kernel log entries
+      let total = k.log_buffer.length()
+      let n = match parse_int(magic_args(code)) {
+        Some(n) => if n < total { n } else { total }
+        None => if total < 30 { total } else { 30 }
+      }
+      let start = total - n
+      let mut out = "kernel log (last \{n} entries):\n"
+      for i = start; i < total; i = i + 1 {
+        out = out + "  \{k.log_buffer[i]}\n"
+      }
+      if total == 0 {
+        out = out + "  (empty)\n"
+      }
+      Some(out)
+    }
     "about" => {
       let uptime = @nodeff.now_seconds() - k.start_time
       let mut pkgs = ""
@@ -2548,7 +2571,7 @@ test "completion suggests magic commands after %" {
   // bare % lists every magic
   let (s2, _e2, all) = complete_token("%", 1)
   assert_eq(s2, 0)
-  assert_eq(all.length(), 12)
+  assert_eq(all.length(), 13)
   // '%' mid-expression (modulo) yields no magic suggestions
   let (_s3, _e3, none) = complete_token("let x = 5 % 3", 13)
   assert_eq(none.length(), 0)
@@ -2639,4 +2662,15 @@ test "filter helpers keep or drop selectively" {
     filter_by([1, 2, 3, 4], fn(x) { x > 2 }),
     [3, 4],
   )
+}
+
+///|
+test "%logs is registered across all three surfaces" {
+  // completion
+  let (_s, _e, matches) = complete_token("%lo", 3)
+  assert_eq(matches, ["%logs"])
+  // doc
+  assert_true(magic_doc("%logs") is Some(_))
+  // help text
+  assert_true(MAGIC_HELP.contains("%logs"))
 }
