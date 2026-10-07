@@ -104,6 +104,15 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 覆盖：SHA-256 FIPS 180-4 向量、HMAC-RFC4231 用例、ZMTP greeting/READY/
 长帧/逐字节喂入、Jupyter 消息签名往返与坏签名拒绝、连接文件解析。
 
+**端到端验证**（可复现）：先启动内核，再运行仓库自带的裸 ZMTP 客户端，
+覆盖 kernel_info / 重放跨 cell 状态 / 值显示 / 结构化 traceback /
+补全（标识符+魔法）/ inspect 文档 / %about 等核心路径：
+
+```bash
+node _build/js/debug/build/main/main.js -f <connection-file> &
+node tools/e2e.mjs <connection-file>
+```
+
 ## Limitations & Roadmap
 
 当前为 MVP，已知限制与演进路线：

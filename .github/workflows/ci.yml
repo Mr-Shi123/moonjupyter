@@ -18,17 +18,19 @@ jobs:
       - name: Set Node.js path
         run: echo "/usr/local/bin" >> $GITHUB_PATH
 
-      - name: Install MoonBit toolchain (v0.10.4)
+      - name: Install MoonBit toolchain (moonc >= 0.10.14)
         run: |
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
-          moonup install v0.10.4 || true
-          moonup use v0.10.4 || true
+          echo 'moonc version:' && $HOME/.moon/bin/moonc -v
 
       - name: Add moon to PATH
         run: echo "$HOME/.moon/bin" >> $GITHUB_PATH
 
       - name: moon check (js target)
         run: moon check --target js
+
+      - name: moon build (js target)
+        run: moon build --target js
 
       - name: moon test (js target)
         run: moon test --target js
