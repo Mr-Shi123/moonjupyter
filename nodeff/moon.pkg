@@ -1,1 +1,16 @@
+import {
+  "Mr-Shi123/moonjupyter/bytesx" @bx,
+  "Mr-Shi123/moonjupyter/jupyter",
+  "Mr-Shi123/moonjupyter/sha256",
+  "moonbitlang/core/json",
+}
 
+options(
+  // the Node.js FFI only exists on the js backend; wasm/wasm-gc get the
+  // aborting stubs in node_stub.mbt so the module typechecks everywhere
+  // (e.g. for `moon publish`)
+  targets: {
+    "node.mbt": ["js"],
+    "node_stub.mbt": ["wasm", "wasm-gc", "native", "llvm"],
+  },
+)

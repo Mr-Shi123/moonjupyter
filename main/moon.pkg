@@ -1,7 +1,7 @@
 import {
-  "moonjupyter/moonjupyter/jupyter",
-  "moonjupyter/moonjupyter/kernel",
-  "moonjupyter/moonjupyter/nodeff",
+  "Mr-Shi123/moonjupyter/jupyter",
+  "Mr-Shi123/moonjupyter/kernel",
+  "Mr-Shi123/moonjupyter/nodeff",
 }
 
 pkgtype(kind: "executable")

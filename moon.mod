@@ -1,6 +1,6 @@
-name = "moonjupyter/moonjupyter"
+name = "Mr-Shi123/moonjupyter"
 
-version = "0.2.8"
+version = "0.3.0"
 
 description = "A Jupyter kernel for MoonBit — write and run MoonBit cells interactively. Includes a pure-MoonBit ZeroMQ (ZMTP 3.1) protocol implementation that can be reused independently."
 

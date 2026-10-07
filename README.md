@@ -136,6 +136,10 @@ node tools/e2e.mjs <connection-file>
 
 ## Changelog
 
+- **v0.3.0** — 首次发布到 mooncakes.io：模块名更正为
+  `Mr-Shi123/moonjupyter`（mooncakes 要求模块名第一段为发布者用户名），
+  nodeff 提供 wasm/wasm-gc/native stub 使模块在全部后端通过检查
+
 - **v0.2.8** — 新魔法 `%source <name>`：显示某个名字的定义来源 cell
   （与 `%who` 配套）；重放组装改为**增量累积**（每个 cell 只追加一个
   块，失败按字符串快照回滚），不再每次重建整个 notebook 源码；

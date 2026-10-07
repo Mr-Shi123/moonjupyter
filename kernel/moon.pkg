@@ -1,6 +1,6 @@
 import {
-  "moonjupyter/moonjupyter/bytesx" @bx,
-  "moonjupyter/moonjupyter/jupyter",
-  "moonjupyter/moonjupyter/nodeff",
-  "moonjupyter/moonjupyter/zmtp",
+  "Mr-Shi123/moonjupyter/bytesx" @bx,
+  "Mr-Shi123/moonjupyter/jupyter",
+  "Mr-Shi123/moonjupyter/nodeff",
+  "Mr-Shi123/moonjupyter/zmtp",
 }
