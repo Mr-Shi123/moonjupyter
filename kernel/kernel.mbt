@@ -92,6 +92,9 @@ priv struct Kernel {
   /// compiles the whole notebook again (accumulated replay), so
   /// definition cells stay visible to later cells
   mut replay_cells : Array[String]
+  /// accumulated replay source blocks (definitions + statement wrappers),
+  /// appended incrementally per cell; snapshots roll it back on failure
+  mut replay_blocks : String
 }
 
 ///|
@@ -134,6 +137,7 @@ pub fn run_kernel(conn : @jupyter.ConnectionInfo) -> Unit {
     last_kill_ms: -1000000,
     last_spawn_ms: -1000000,
     replay_cells: [],
+    replay_blocks: "",
   }
   let shell = Channel::new("shell", "ROUTER")
   let control = Channel::new("control", "ROUTER")
@@ -492,7 +496,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
-const KERNEL_VERSION : String = "0.2.7"
+const KERNEL_VERSION : String = "0.2.8"
 
 ///|
 /// Return the last `keep` elements of `xs`.
@@ -601,6 +605,8 @@ const MAGIC_HELP : String = "moonjupyter magic commands:\n" +
   "  %timeout [<ms>]    — show/set the per-cell wall-time limit\n" +
   "  %html <content>    — render rich HTML output (display_data)\n" +
   "  %md <content>      — render rich Markdown output\n" +
+  "  %who               — list definitions in the notebook state\n" +
+  "  %source <name>     — show the cell that defined a name\n" +
   "  %reset             — clear history, counters and metrics"
 
 ///|
@@ -1135,11 +1141,21 @@ fn run_cell(
   // state); every other cell joins the replay, and the generated source
   // recompiles the whole notebook so earlier definitions stay visible.
   let replay_len_before = k.replay_cells.length()
+  // Incremental replay assembly: the accumulated block text is kept in
+  // the kernel and each run appends one block (string snapshots make
+  // rollback free). Equivalent by construction to build_replay, without
+  // re-concatenating the whole notebook on every cell.
+  let blocks_snapshot = k.replay_blocks
   let standalone = contains_main_fn(code)
   let src = if standalone {
     code
   } else {
-    build_replay(k.replay_cells, code)
+    let idx = k.replay_cells.length() + 1
+    let cur_is_def = is_def_cell(code)
+    let cur_block = replay_cell_block(idx, code)
+    let src = k.replay_blocks + cur_block + replay_footer(idx, cur_is_def)
+    k.replay_blocks = k.replay_blocks + cur_block
+    src
   }
   if !standalone {
     k.replay_cells.push(code)
@@ -1220,6 +1236,7 @@ fn run_cell(
         flush_pending(k, err_buf, "stderr")
         // aborted mid-run: its half-finished state must not join the replay
         k.replay_cells = keep_first(k.replay_cells, replay_len_before)
+        k.replay_blocks = blocks_snapshot
         k.metrics.error_count = k.metrics.error_count + 1
         log_kernel(k, LogLevel::Warn, "cell \{k.exec_count} interrupted")
         on_done(
@@ -1230,6 +1247,7 @@ fn run_cell(
       } else {
         // a failed cell leaves no usable state: roll it back out of the replay
         k.replay_cells = keep_first(k.replay_cells, replay_len_before)
+        k.replay_blocks = blocks_snapshot
         k.metrics.error_count = k.metrics.error_count + 1
         // structured traceback: clean main.mbt:line:col entries + hint
         let tb : Array[String] = diagnose(err_text)
@@ -1269,6 +1287,7 @@ fn run_cell(
       flush_pending(k, err_buf, "stderr")
       // and its half-finished state leaves no usable replay
       k.replay_cells = keep_first(k.replay_cells, replay_len_before)
+      k.replay_blocks = blocks_snapshot
       @nodeff.rmrf(dir)
       on_done(
         false,
@@ -1572,17 +1591,10 @@ fn notebook_definitions(cells : Array[String]) -> Array[(String, String)] {
       if t == "" || (t.length() >= 2 && t[0] == 47 && t[1] == 47) {
         continue // blank or // comment
       }
-      let toks = first_idents(t, 3)
-      if toks.length() < 2 || !is_def_cell(t) {
-        continue
+      match def_line_info(t) {
+        Some((name, kind)) => out.push((name, kind))
+        None => ()
       }
-      let kind = toks[0]
-      let name = if kind == "let" && toks.length() >= 3 && toks[1] == "mut" {
-        toks[2]
-      } else {
-        toks[1]
-      }
-      out.push((name, kind))
     }
   }
   out
@@ -1605,6 +1617,48 @@ fn first_idents(t : String, count : Int) -> Array[String] {
     }
   }
   out
+}
+
+///|
+/// If a trimmed line declares a top-level binding, return (name, kind).
+fn def_line_info(t : String) -> (String, String)? {
+  let toks = first_idents(t, 3)
+  if toks.length() < 2 || !is_def_cell(t) {
+    return None
+  }
+  let kind = toks[0]
+  let name = if kind == "let" && toks.length() >= 3 && toks[1] == "mut" {
+    toks[2]
+  } else {
+    toks[1]
+  }
+  Some((name, kind))
+}
+
+///|
+/// Find the first replay cell that defines `name` at top level.
+fn find_def_cell(cells : Array[String], name : String) -> String? {
+  for cell in cells {
+    if !is_def_cell(cell) {
+      continue
+    }
+    let lines = cell.split("\n")
+      |> Iter::to_array
+      |> Array::map(fn(v) { v.to_owned() })
+    for line in lines {
+      let t = trim_ascii(line)
+      if t == "" || (t.length() >= 2 && t[0] == 47 && t[1] == 47) {
+        continue
+      }
+      match def_line_info(t) {
+        Some((nm, _kind)) => if nm == name {
+          return Some(cell)
+        }
+        None => ()
+      }
+    }
+  }
+  None
 }
 
 ///|
@@ -1730,26 +1784,39 @@ fn starts_with_word(code : String, start : Int, word : String) -> Bool {
 /// level in order; statement cells (past and current) become numbered
 /// functions, but main invokes only the current cell's function — earlier
 /// cells' side effects must not repeat on every execution.
+///|
+/// The source block contributed by cell `idx` (1-based): definition cells
+/// are spliced as a comment plus raw code; statement cells become named
+/// wrapper functions. Shared by the batch builder and the incremental
+/// kernel accumulator so both produce identical sources.
+fn replay_cell_block(idx : Int, code : String) -> String {
+  if is_def_cell(code) {
+    "// cell " + idx.to_string() + " (definitions)\n" + code + "\n"
+  } else {
+    "fn __cell_" + idx.to_string() + "() -> Unit {\n" + code + "\n}\n"
+  }
+}
+
+///|
+/// The main entry appended after all blocks: statement cells run only for
+/// the current cell; definition cells need no invocation.
+fn replay_footer(current_idx : Int, current_is_def : Bool) -> String {
+  if current_is_def {
+    "\nfn main {\n}\n"
+  } else {
+    "\nfn main {\n  __cell_" + current_idx.to_string() + "()\n}\n"
+  }
+}
+
+///|
 fn build_replay(past : Array[String], current : String) -> String {
-  let mut out = ""
+  let mut blocks = ""
   let mut n = 0
   for cell in past {
     n = n + 1
-    if is_def_cell(cell) {
-      out = out + "// cell " + n.to_string() + " (definitions)\n" + cell + "\n"
-    } else {
-      out = out + "fn __cell_" + n.to_string() + "() -> Unit {\n" + cell + "\n}\n"
-    }
+    blocks = blocks + replay_cell_block(n, cell)
   }
-  let current_idx = n + 1
-  if is_def_cell(current) {
-    out = out + "// cell " + current_idx.to_string() + " (definitions)\n" + current + "\n"
-    out = out + "\nfn main {\n}\n"
-  } else {
-    out = out + "fn __cell_" + current_idx.to_string() + "() -> Unit {\n" + current + "\n}\n"
-    out = out + "\nfn main {\n  __cell_" + current_idx.to_string() + "()\n}\n"
-  }
-  out
+  blocks + replay_cell_block(n + 1, current) + replay_footer(n + 1, is_def_cell(current))
 }
 
 ///|
@@ -1861,6 +1928,17 @@ fn parse_magic(k : Kernel, code : String) -> String? {
         out = out + "  (none — definition cells like 'let n = 1' land here)\n"
       }
       Some(out)
+    }
+    "source" => {
+      let arg = magic_args(code)
+      if arg == "" {
+        Some("usage: %source <name> — show the cell that defined it (see %who)")
+      } else {
+        match find_def_cell(k.replay_cells, arg) {
+          Some(cell) => Some("// source of \{arg}:\n" + cell)
+          None => Some("no definition of \{arg} in the notebook state (see %who)")
+        }
+      }
     }
     "unuse" => {
       let arg = magic_args(code)
