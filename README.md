@@ -45,6 +45,7 @@ cd moonjupyter
 
 # 校验 + 单元测试（需要 node）
 moon check --target js
+moon build --target js
 moon test  --target js
 
 # 注册 kernelspec（写入 Jupyter kernels 目录）
@@ -104,7 +105,14 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 覆盖：SHA-256 FIPS 180-4 向量、HMAC-RFC4231 用例、ZMTP greeting/READY/
 长帧/逐字节喂入、Jupyter 消息签名往返与坏签名拒绝、连接文件解析。
 
-**端到端验证**（可复现）：先启动内核，再运行仓库自带的裸 ZMTP 客户端，
+**真实 Jupyter 客户端验收测试**：安装 `jupyter_client` 后运行以下命令。测试会经 `launcher.mjs` 启动内核，检查 kernel ready、cell 执行与 iopub 输出、心跳、control 关闭和启动器退出：
+
+```bash
+python -m pip install "jupyter_client>=8,<9"
+python tools/jupyter_client_smoke.py
+```
+
+**裸 ZMTP 端到端验证**（可复现）：先启动内核，再运行仓库自带的客户端，
 覆盖 kernel_info / 重放跨 cell 状态 / 值显示 / 结构化 traceback /
 补全（标识符+魔法）/ inspect 文档 / %about 等核心路径：
 
@@ -122,9 +130,8 @@ node tools/e2e.mjs <connection-file>
    直接可用；语句 cell 只执行当前一次（历史副作用不重复）。含自写
    `fn main` 的 cell 作为完整程序单独执行，不进入重放。`%reset` 清空。
    → 路线：常驻会话进程 + 增量编译，避免重放编译时间随 notebook 增长。
-2. **补全/检查为空实现**：`complete_request` / `inspect_request` 返回空。
-   → 路线：对接 MoonBit 编译器诊断信息。
-3. **stdin 未实现**、`interrupt_request` 忽略（interrupt_mode=message）。
+2. **补全/检查为启发式实现**：支持关键字、当前 cell 标识符和魔法命令补全，以及内置文档查询；尚未对接 MoonBit 编译器的语义信息。
+3. **stdin 输入请求尚未实现**；`interrupt_request` 已支持中断运行中的 cell。
 4. ZMTP 仅 NULL 安全机制。→ 路线：基于 mooncrypt 的 CURVE（Curve25519）。
 5. 传输层依赖 Node。→ 路线：`moonbitlang/async` 原生后端直连 TCP。
 
@@ -136,8 +143,10 @@ node tools/e2e.mjs <connection-file>
 
 ## Changelog
 
-- **v0.3.0** — 首次发布到 mooncakes.io：模块名更正为
-  `Mr-Shi123/moonjupyter`（mooncakes 要求模块名第一段为发布者用户名），
+- **v0.3.1** — 修复 libzmq greeting 兼容性与 `jupyter_client` ready 状态；新增真实 Jupyter 客户端验收测试并加入 CI。
+
+- **v0.3.0** — 模块名更正为 `Mr-Shi123/moonjupyter`
+  （mooncakes 要求模块名第一段为发布者用户名），
   nodeff 提供 wasm/wasm-gc/native stub 使模块在全部后端通过检查
 
 - **v0.2.8** — 新魔法 `%source <name>`：显示某个名字的定义来源 cell
