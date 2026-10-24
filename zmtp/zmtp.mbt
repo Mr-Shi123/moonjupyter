@@ -75,12 +75,14 @@ priv struct ZFrame {
 
 ///|
 /// Build the 64-byte ZMTP greeting.
-/// Magic `0xFF` + 8 zero bytes + `0x7F` + version + mechanism + as-server flag.
+/// Magic `0xFF` + 8 padding bytes + `0x7F` + version + mechanism + as-server flag.
 pub fn greeting_bytes(as_server : Bool) -> Bytes {
   let out : Array[Byte] = []
   out.push(@bx.u8(0xFF)) /// 0xFF magic byte
-  for _i = 0; _i < 8; _i = _i + 1 {
-    out.push(@bx.u8(0)) /// 8-byte long size placeholder
+  for i = 0; i < 8; i = i + 1 {
+    // libzmq uses 0x01 here to detect legacy ZMTP/1 peers. The padding
+    // is otherwise insignificant under ZMTP 3.1.
+    out.push(@bx.u8(if i == 7 { 1 } else { 0 }))
   }
   out.push(@bx.u8(0x7F)) /// version-present flag
   out.push(@bx.u8(3)) /// version major
@@ -283,11 +285,7 @@ fn ZmtpSession::try_greeting(self : ZmtpSession) -> String? {
   if self.buf[base].to_int() != 0xFF || self.buf[base + 9].to_int() != 0x7F {
     return None
   }
-  for i = 1; i < 9; i = i + 1 {
-    if self.buf[base + i].to_int() != 0 {
-      return None
-    }
-  }
+  // Signature octets 1..8 are padding, not a required all-zero field.
   if self.buf[base + 10].to_int() < 3 {
     return None
   }
@@ -433,6 +431,24 @@ test "handshake" {
   let events2 = s.feed(ready_command("REQ"))
   match events2[0] {
     PeerReady(t) => assert_eq(t, "REQ")
+    _ => assert_true(false)
+  }
+}
+
+///|
+test "libzmq greeting padding is accepted" {
+  // libzmq uses 0x01 in the last padding octet for legacy peer detection.
+  // ZMTP 3.1 marks all eight padding octets as insignificant.
+  let g : Array[Byte] = []
+  let original = greeting_bytes(false)
+  assert_eq(original[8].to_int(), 1)
+  assert_eq(original[32].to_int(), 0)
+  for i = 0; i < original.length(); i = i + 1 {
+    g.push(if i == 4 { @bx.u8(0xA5) } else { original[i] })
+  }
+  let s = ZmtpSession::new()
+  match s.feed(Bytes::from_array(g))[0] {
+    PeerGreeting => ()
     _ => assert_true(false)
   }
 }
