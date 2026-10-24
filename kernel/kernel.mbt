@@ -189,7 +189,8 @@ fn bind_channel(k : Kernel, ch : Channel, ip : String, port : Int) -> Unit {
       }
       // ZMTP 3.1: the listening side sends its greeting immediately on
       // connect, before any command or message traffic.
-      @nodeff.tcp_send(id, @zmtp.greeting_bytes(true))
+      // NULL security requires the as-server greeting flag to be zero.
+      @nodeff.tcp_send(id, @zmtp.greeting_bytes(false))
       log_kernel(
         k,
         LogLevel::Info,
@@ -353,8 +354,20 @@ fn handle_message(
 ///|
 fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
   match msg.msg_type {
-    "kernel_info_request" =>
+    "kernel_info_request" => {
+      k.parent = Some(msg.header)
+      publish(
+        k,
+        "status",
+        @jupyter.obj([("execution_state", Json::string("busy"))]),
+      )
       reply(k, peer, "kernel_info_reply", kernel_info(k), msg)
+      publish(
+        k,
+        "status",
+        @jupyter.obj([("execution_state", Json::string("idle"))]),
+      )
+    }
     "execute_request" => handle_execute(k, peer, msg)
     "is_complete_request" => {
       let code = @jupyter.jstr_field(msg.content, "code")
@@ -496,7 +509,7 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
 ///|
 /// Version reported to Jupyter clients via kernel_info; keep in sync with
 /// the version in moon.mod.
-const KERNEL_VERSION : String = "0.2.8"
+const KERNEL_VERSION : String = "0.3.1"
 
 ///|
 /// Return the last `keep` elements of `xs`.
