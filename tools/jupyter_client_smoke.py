@@ -72,6 +72,21 @@ def main():
                 assert client.hb_channel.is_beating(), "heartbeat channel not responding"
                 print("PASS: heartbeat")
 
+                e2e = subprocess.run(
+                    ["node", "tools/e2e.mjs", connection_file],
+                    cwd=ROOT,
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=90,
+                    check=False,
+                )
+                print(e2e.stdout, end="")
+                if e2e.stderr:
+                    print(e2e.stderr, end="", file=sys.stderr)
+                assert e2e.returncode == 0, f"core E2E failed (exit {e2e.returncode})"
+                assert "ALL E2E CHECKS PASSED" in e2e.stdout, "core E2E did not report success"
+
                 client.shutdown(restart=False)
                 response = client.get_control_msg(timeout=10)
                 assert response["msg_type"] == "shutdown_reply", "control shutdown reply missing"
