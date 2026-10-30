@@ -18,10 +18,20 @@ jobs:
       - name: Set Node.js path
         run: echo "/usr/local/bin" >> $GITHUB_PATH
 
-      - name: Install MoonBit toolchain (moonc >= 0.10.14)
+      - name: Install MoonBit toolchain (moonc >= 0.10.16)
         run: |
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
-          echo 'moonc version:' && $HOME/.moon/bin/moonc -v
+          moonc_version="$("$HOME/.moon/bin/moonc" -v)"
+          echo "moonc version: $moonc_version"
+          if [[ ! "$moonc_version" =~ ^v([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            echo "::error::Unable to parse moonc version"
+            exit 1
+          fi
+          current="${BASH_REMATCH[1]}"
+          if ! printf '0.10.16\n%s\n' "$current" | sort -V -C; then
+            echo "::error::moonc $current is below the required 0.10.16"
+            exit 1
+          fi
 
       - name: Add moon to PATH
         run: echo "$HOME/.moon/bin" >> $GITHUB_PATH
@@ -42,5 +52,5 @@ jobs:
       - name: Install Jupyter client for protocol smoke test
         run: python -m pip install 'jupyter_client>=8,<9'
 
-      - name: Verify Jupyter client can start and use the kernel
+      - name: Verify Jupyter client and core end-to-end paths
         run: python tools/jupyter_client_smoke.py
