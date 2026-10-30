@@ -36,7 +36,7 @@ Notebook 中交互式运行 MoonBit 代码。项目同时包含一个可独立�
 
 ## Quick Start
 
-前置要求：`moon` CLI、Node.js >= 18、Jupyter（Lab/Notebook 均可）。
+前置要求：`moon` CLI（`moonc >= 0.10.16`）、Node.js >= 18、Jupyter（Lab/Notebook 均可）。
 > Tip: 在 `moonup` 或 `moon` 官网装好 CLI 后，用 `moon --version` 验证。
 
 ```bash
@@ -105,7 +105,7 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 覆盖：SHA-256 FIPS 180-4 向量、HMAC-RFC4231 用例、ZMTP greeting/READY/
 长帧/逐字节喂入、Jupyter 消息签名往返与坏签名拒绝、连接文件解析。
 
-**真实 Jupyter 客户端验收测试**：安装 `jupyter_client` 后运行以下命令。测试会经 `launcher.mjs` 启动内核，检查 kernel ready、cell 执行与 iopub 输出、心跳、control 关闭和启动器退出：
+**真实 Jupyter 客户端验收测试**：安装 `jupyter_client` 后运行以下命令。测试会经 `launcher.mjs` 启动内核，检查 kernel ready、cell 执行与 iopub 输出、心跳、control 关闭和启动器退出，并在同一内核上运行下面的裸 ZMTP 端到端脚本；CI 也运行此命令：
 
 ```bash
 python -m pip install "jupyter_client>=8,<9"
