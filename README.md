@@ -22,6 +22,7 @@ Notebook 中交互式运行 MoonBit 代码。项目同时包含一个可独立�
 - **Jupyter 协议 v5.4**：`<IDS|MSG>` 信封、HMAC-SHA256 签名（内置纯 MoonBit
   SHA-256/HMAC）、连接文件解析、UUID v4
 - **五个通道**：shell/control/stdin（ROUTER）、iopub（PUB）、hb（REP 心跳回显）
+- **客户端发现**：回复 Jupyter `comm_info_request`；当前无 comm 目标时返回空映射，前端查询不会超时
 - **cell 执行**：临时项目 + `moon run`，stdout/stderr 按行流式回传 iopub，
   成功/错误分别产出 execute_reply，metadata 携带真实执行耗时
 - **交互体验**：TAB 补全（关键字 + 当前 cell 标识符）、`is_complete` 括号/字符串
@@ -105,7 +106,7 @@ moon test --target js   # SHA-256/HMAC 官方向量、ZMTP 握手与帧编解码
 覆盖：SHA-256 FIPS 180-4 向量、HMAC-RFC4231 用例、ZMTP greeting/READY/
 长帧/逐字节喂入、Jupyter 消息签名往返与坏签名拒绝、连接文件解析。
 
-**真实 Jupyter 客户端验收测试**：安装 `jupyter_client` 后运行以下命令。测试会经 `launcher.mjs` 启动内核，检查 kernel ready、cell 执行与 iopub 输出、心跳、control 关闭和启动器退出，并在同一内核上运行下面的裸 ZMTP 端到端脚本；CI 也运行此命令：
+**真实 Jupyter 客户端验收测试**：安装 `jupyter_client` 后运行以下命令。测试会经 `launcher.mjs` 启动内核，检查 kernel ready、comm 信息查询、cell 执行与 iopub 输出、心跳、control 关闭和启动器退出，并在同一内核上运行下面的裸 ZMTP 端到端脚本；CI 也运行此命令：
 
 ```bash
 python -m pip install "jupyter_client>=8,<9"
@@ -132,6 +133,7 @@ node tools/e2e.mjs <connection-file>
    → 路线：常驻会话进程 + 增量编译，避免重放编译时间随 notebook 增长。
 2. **补全/检查为启发式实现**：支持关键字、当前 cell 标识符和魔法命令补全，以及内置文档查询；尚未对接 MoonBit 编译器的语义信息。
 3. **stdin 输入请求尚未实现**；`interrupt_request` 已支持中断运行中的 cell。
+   Jupyter comm/widget 会话尚未实现；`comm_info_request` 会准确返回空映射。
 4. ZMTP 仅 NULL 安全机制。→ 路线：基于 mooncrypt 的 CURVE（Curve25519）。
 5. 传输层依赖 Node。→ 路线：`moonbitlang/async` 原生后端直连 TCP。
 
@@ -142,6 +144,8 @@ node tools/e2e.mjs <connection-file>
 `<user>/moonjupyter/zmtp` 被其他项目引用。
 
 ## Changelog
+
+- **Unreleased** — 为 Jupyter 客户端的 `comm_info_request` 返回协议格式的空 comm 列表，并加入真实客户端验收测试。
 
 - **v0.3.1** — 修复 libzmq greeting 兼容性与 `jupyter_client` ready 状态；新增真实 Jupyter 客户端验收测试并加入 CI。
 
