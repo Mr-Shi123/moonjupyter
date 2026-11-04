@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from queue import Empty
 
 from jupyter_client import BlockingKernelClient
 from jupyter_client.connect import write_connection_file
@@ -38,6 +39,22 @@ def main():
                 client.start_channels()
                 client.wait_for_ready(timeout=45)
                 print("PASS: jupyter_client kernel ready")
+
+                comm_msg_id = client.comm_info(target_name="jupyter.widget")
+                comm_reply = None
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    try:
+                        candidate = client.get_shell_msg(timeout=deadline - time.monotonic())
+                    except Empty:
+                        break
+                    if candidate.get("parent_header", {}).get("msg_id") == comm_msg_id:
+                        comm_reply = candidate
+                        break
+                assert comm_reply is not None, "comm_info_reply missing"
+                assert comm_reply["msg_type"] == "comm_info_reply", "comm_info_reply missing"
+                assert comm_reply["content"] == {"status": "ok", "comms": {}}, "unsupported comms reported"
+                print("PASS: comm_info returns an empty comm map")
 
                 msg_id = client.execute('println("hello from smoke test")')
                 deadline = time.monotonic() + 60
