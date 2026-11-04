@@ -449,6 +449,19 @@ fn dispatch(k : Kernel, peer : Peer, msg : @jupyter.JMsg) -> Unit {
         ]),
         msg,
       )
+    "comm_info_request" =>
+      // No comm targets are registered yet; report the empty set so a
+      // frontend can finish discovery without waiting for a timeout.
+      reply(
+        k,
+        peer,
+        "comm_info_reply",
+        @jupyter.obj([
+          ("status", Json::string("ok")),
+          ("comms", @jupyter.obj([])),
+        ]),
+        msg,
+      )
     "shutdown_request" => {
       // Echo the client's restart flag so jupyter_client knows whether to
       // relaunch this kernel after exit.
